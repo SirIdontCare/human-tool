@@ -1,9 +1,10 @@
 import fs from "fs";
 import path from "path";
 import { Pool } from "pg";
-import dotenv from "dotenv";
+import { loadEnvConfig } from "@next/env";
 
-dotenv.config();
+// Load Next.js environment variables (.env, .env.local, .env.development, etc.)
+loadEnvConfig(process.cwd());
 
 async function runMigration() {
   const databaseUrl = process.env.DATABASE_URL;
