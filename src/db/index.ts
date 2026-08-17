@@ -1,6 +1,11 @@
 import { Pool } from "pg";
+import { loadEnvConfig } from "@next/env";
 import { TASK_CATALOGUE } from "../lib/catalogue";
 import { TaskStatus, validateTransition } from "../lib/state-machine";
+
+// Ensure environment variables (.env.local, .env, etc.) are loaded
+loadEnvConfig(process.cwd());
+
 
 // Types
 export interface TaskTypeRow {
