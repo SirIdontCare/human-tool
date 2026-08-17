@@ -1,47 +1,84 @@
 import fs from "fs";
 import path from "path";
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
 import { loadEnvConfig } from "@next/env";
 
-// Load Next.js environment variables (.env, .env.local, .env.development, etc.)
+// Load Next.js environment variables (.env, .env.local, etc.)
 loadEnvConfig(process.cwd());
 
-async function runMigration() {
+export async function runMigration() {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
-    console.log("No DATABASE_URL found. Skipping live PostgreSQL migration (in-memory mode enabled).");
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("DATABASE_URL is missing in production. Cannot run migrations.");
+    }
+    console.log("No DATABASE_URL found. Skipping PostgreSQL migrations (in-memory mode).");
     return;
   }
 
   console.log("Connecting to PostgreSQL to run migrations...");
   const pool = new Pool({
     connectionString: databaseUrl,
-    ssl: databaseUrl.includes("localhost") ? false : { rejectUnauthorized: false },
+    ssl: databaseUrl.includes("localhost") ? false : true,
   });
 
   try {
-    const schemaSql = fs.readFileSync(path.join(__dirname, "schema.sql"), "utf-8");
-    await pool.query(schemaSql);
-
-    // Clean up any duplicates from earlier pre-constraint test runs
+    // 1. Ensure schema_migrations table exists
     await pool.query(`
-      DELETE FROM tasks WHERE id NOT IN (
-        SELECT MIN(id) FROM tasks GROUP BY quote_id
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version VARCHAR(64) PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-      DELETE FROM task_offers WHERE id NOT IN (
-        SELECT MIN(id) FROM task_offers GROUP BY task_id, worker_id
-      );
-
-      ALTER TABLE tasks ADD COLUMN IF NOT EXISTS agent_token_hash VARCHAR(64);
-      ALTER TABLE task_offers ADD COLUMN IF NOT EXISTS worker_token_hash VARCHAR(64);
-
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_quote_id_unique ON tasks(quote_id);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_task_offers_unique ON task_offers(task_id, worker_id);
     `);
 
-    console.log("Database schema migration completed successfully!");
+    // 2. Query already applied migrations
+    const appliedRes = await pool.query(`SELECT version FROM schema_migrations ORDER BY version ASC`);
+    const appliedVersions = new Set(appliedRes.rows.map((r) => r.version));
+
+    // 3. Read migration files from migrations directory
+    const migrationsDir = path.join(process.cwd(), "migrations");
+    if (!fs.existsSync(migrationsDir)) {
+      throw new Error(`Migrations directory '${migrationsDir}' does not exist.`);
+    }
+
+    const files = fs.readdirSync(migrationsDir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+
+    console.log(`Discovered ${files.length} migration files in migrations/.`);
+
+    for (const file of files) {
+      const version = path.basename(file, ".sql");
+      if (appliedVersions.has(version)) {
+        console.log(`[SKIPPED] Migration ${file} is already applied.`);
+        continue;
+      }
+
+      console.log(`[APPLYING] Migration ${file}...`);
+      const sql = fs.readFileSync(path.join(migrationsDir, file), "utf-8");
+
+      const client: PoolClient = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(sql);
+        await client.query(
+          `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, NOW())`,
+          [version]
+        );
+        await client.query("COMMIT");
+        console.log(`[SUCCESS] Migration ${file} applied and recorded in schema_migrations.`);
+      } catch (err) {
+        await client.query("ROLLBACK");
+        console.error(`[FAILED] Migration ${file} failed:`, err);
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    console.log("All database schema migrations completed successfully!");
   } catch (err) {
-    console.error("Database migration failed:", err);
+    console.error("Database migration runner failed:", err);
     process.exit(1);
   } finally {
     await pool.end();

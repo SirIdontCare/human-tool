@@ -1,11 +1,21 @@
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
 import { loadEnvConfig } from "@next/env";
 import { TASK_CATALOGUE } from "../lib/catalogue";
 import { TaskStatus, validateTransition } from "../lib/state-machine";
 import { generateToken, hashToken, verifyTokenHash } from "../lib/auth";
+import { ServiceError } from "../lib/errors";
 
 // Ensure environment variables (.env.local, .env, etc.) are loaded
 loadEnvConfig(process.cwd());
+
+// 1. Production Database Safety Enforcement
+function checkProductionDbSafety() {
+  if (process.env.NODE_ENV === "production" && !process.env.DATABASE_URL) {
+    throw new Error(
+      "FATAL: DATABASE_URL environment variable is required in production. In-memory storage fallback is disabled."
+    );
+  }
+}
 
 // Types
 export interface TaskTypeRow {
@@ -91,7 +101,7 @@ export interface EventRow {
   created_at: string;
 }
 
-// In-Memory Store for isolated testing or fallback
+// In-Memory Store for isolated unit testing only
 class InMemoryStore {
   taskTypes = new Map<string, TaskTypeRow>();
   workers = new Map<string, WorkerRow>();
@@ -107,7 +117,6 @@ class InMemoryStore {
   }
 
   seed() {
-    // Seed task types
     for (const item of Object.values(TASK_CATALOGUE)) {
       this.taskTypes.set(item.code, {
         id: item.code,
@@ -125,7 +134,6 @@ class InMemoryStore {
       });
     }
 
-    // Seed mock workers
     const mockWorkers: WorkerRow[] = [
       { id: "w_alex_ux", display_name: "Alex Rivera (Senior UX Specialist)", email: "alex@example.com", status: "ACTIVE", created_at: new Date().toISOString() },
       { id: "w_sam_arch", display_name: "Sam Chen (Principal Cloud Architect)", email: "sam@example.com", status: "ACTIVE", created_at: new Date().toISOString() },
@@ -137,7 +145,6 @@ class InMemoryStore {
       this.workers.set(w.id, w);
     }
 
-    // Seed worker capabilities
     const mockCaps: WorkerCapabilityRow[] = [
       { id: "wc_1", worker_id: "w_alex_ux", capability_code: "UX_CONVERSION_ANALYSIS", score: 0.98, status: "VERIFIED", verified_at: new Date().toISOString() },
       { id: "wc_2", worker_id: "w_sam_arch", capability_code: "SYSTEM_ARCHITECTURE", score: 0.99, status: "VERIFIED", verified_at: new Date().toISOString() },
@@ -168,14 +175,18 @@ class InMemoryStore {
 // Global in-memory singleton
 const memStore = new InMemoryStore();
 
-// Neon / PostgreSQL Pool
+// Neon / PostgreSQL Pool (Serverless-Safe Configuration with Validated SSL)
 let pgPool: Pool | null = null;
 
 function getPgPool(): Pool | null {
+  checkProductionDbSafety();
   if (process.env.DATABASE_URL && !pgPool) {
     pgPool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DATABASE_URL.includes("localhost") ? false : { rejectUnauthorized: false },
+      ssl: process.env.DATABASE_URL.includes("localhost") ? false : true,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
     });
   }
   return pgPool;
@@ -191,17 +202,19 @@ export const db = {
   },
 
   // Raw query interface
-  async query<T = any>(sql: string, params: any[] = []): Promise<T[]> {
+  async query<T = unknown>(sql: string, params: unknown[] = []): Promise<T[]> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(sql, params);
-      return res.rows;
+      return res.rows as T[];
     }
     return [];
   },
 
   // Task Types
   async getAllTaskTypes(): Promise<TaskTypeRow[]> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM task_types WHERE active = true ORDER BY code ASC`);
@@ -216,6 +229,7 @@ export const db = {
   },
 
   async getTaskType(code: string): Promise<TaskTypeRow | null> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM task_types WHERE code = $1 AND active = true LIMIT 1`, [code]);
@@ -233,6 +247,7 @@ export const db = {
 
   // Workers & Capabilities
   async getWorkers(): Promise<WorkerRow[]> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM workers ORDER BY id ASC`);
@@ -242,6 +257,7 @@ export const db = {
   },
 
   async getWorker(id: string): Promise<WorkerRow | null> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM workers WHERE id = $1 LIMIT 1`, [id]);
@@ -251,6 +267,7 @@ export const db = {
   },
 
   async verifyWorkerCapability(workerId: string, capabilityCode: string): Promise<boolean> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(
@@ -268,6 +285,7 @@ export const db = {
   },
 
   async getWorkersByCapability(capabilityCode: string): Promise<WorkerRow[]> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(
@@ -298,6 +316,7 @@ export const db = {
     estimated_minutes: number;
     expires_at: string;
   }): Promise<QuoteRow> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     const createdAt = new Date().toISOString();
     const row: QuoteRow = {
@@ -333,6 +352,7 @@ export const db = {
   },
 
   async getQuote(id: string): Promise<QuoteRow | null> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM quotes WHERE id = $1 LIMIT 1`, [id]);
@@ -348,8 +368,9 @@ export const db = {
     return memStore.quotes.get(id) || null;
   },
 
-  // Tasks (Idempotent & Auth Token Generation)
+  // Tasks (Idempotent Creation with One Transaction)
   async getTaskByQuoteId(quoteId: string): Promise<TaskRow | null> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM tasks WHERE quote_id = $1 LIMIT 1`, [quoteId]);
@@ -365,6 +386,7 @@ export const db = {
     task_type_id: string;
     input_payload: Record<string, unknown>;
   }): Promise<{ task: TaskRow; agent_token: string; offers: Array<{ worker_id: string; worker_token: string; offer_id: string }>; is_existing: boolean }> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     const now = new Date().toISOString();
 
@@ -373,7 +395,7 @@ export const db = {
     if (existing) {
       return {
         task: existing,
-        agent_token: "", // not re-exposed on idempotent read unless requested
+        agent_token: "",
         offers: [],
         is_existing: true,
       };
@@ -394,7 +416,6 @@ export const db = {
       updated_at: now,
     };
 
-    // Find qualified workers
     const taskType = await this.getTaskType(params.task_type_id);
     const capability = taskType?.required_capability || "";
     const qualifiedWorkers = await this.getWorkersByCapability(capability);
@@ -406,7 +427,6 @@ export const db = {
       try {
         await client.query("BEGIN");
 
-        // Insert task with UNIQUE(quote_id) enforcement
         const taskInsert = await client.query(
           `INSERT INTO tasks (id, quote_id, task_type_id, status, input_payload, assigned_worker_id, agent_token_hash, created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -425,7 +445,6 @@ export const db = {
           ]
         );
 
-        // If duplicate conflict occurred concurrently, fetch and return existing
         if (taskInsert.rows.length === 0) {
           await client.query("ROLLBACK");
           const conflictTask = await this.getTaskByQuoteId(params.quote_id);
@@ -437,7 +456,6 @@ export const db = {
           };
         }
 
-        // Insert task offers for each qualified worker
         for (const worker of qualifiedWorkers) {
           const workerToken = generateToken("otk");
           const workerTokenHash = hashToken(workerToken);
@@ -462,7 +480,6 @@ export const db = {
         client.release();
       }
     } else {
-      // In-Memory atomic insertion
       if (memStore.tasks.has(taskRow.id) || Array.from(memStore.tasks.values()).some((t) => t.quote_id === taskRow.quote_id)) {
         const conflictTask = Array.from(memStore.tasks.values()).find((t) => t.quote_id === taskRow.quote_id);
         return { task: conflictTask!, agent_token: "", offers: [], is_existing: true };
@@ -493,6 +510,7 @@ export const db = {
   },
 
   async getTask(id: string): Promise<TaskRow | null> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM tasks WHERE id = $1 LIMIT 1`, [id]);
@@ -504,6 +522,7 @@ export const db = {
 
   // Token Verification
   async verifyAgentToken(taskId: string, agentToken: string): Promise<boolean> {
+    checkProductionDbSafety();
     if (!agentToken) return false;
     const task = await this.getTask(taskId);
     if (!task || !task.agent_token_hash) return false;
@@ -511,6 +530,7 @@ export const db = {
   },
 
   async verifyWorkerToken(taskId: string, workerId: string, workerToken: string): Promise<boolean> {
+    checkProductionDbSafety();
     if (!workerToken) return false;
     const pool = getPgPool();
     if (pool) {
@@ -528,6 +548,7 @@ export const db = {
   },
 
   async getOffersForTask(taskId: string): Promise<TaskOfferRow[]> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM task_offers WHERE task_id = $1 ORDER BY offered_at ASC`, [taskId]);
@@ -536,12 +557,13 @@ export const db = {
     return Array.from(memStore.taskOffers.values()).filter((o) => o.task_id === taskId);
   },
 
-  // Task Acceptance (Capability Verified, Token Authenticated, Atomic Concurrency Safe)
+  // Task Acceptance (Atomic with Capability and Token Auth)
   async acceptTask(
     taskId: string,
     workerId: string,
     workerToken?: string
   ): Promise<{ success: boolean; task?: TaskRow; error?: string; code?: number }> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     const now = new Date().toISOString();
 
@@ -550,7 +572,6 @@ export const db = {
       return { success: false, error: `Task '${taskId}' not found`, code: 404 };
     }
 
-    // 1. Verify Worker Capability
     const taskType = await this.getTaskType(task.task_type_id);
     const hasCapability = await this.verifyWorkerCapability(workerId, taskType?.required_capability || "");
     if (!hasCapability) {
@@ -561,7 +582,6 @@ export const db = {
       };
     }
 
-    // 2. Verify Worker Offer Token if token auth is provided
     if (workerToken) {
       const validToken = await this.verifyWorkerToken(taskId, workerId, workerToken);
       if (!validToken) {
@@ -570,7 +590,6 @@ export const db = {
     }
 
     if (pool) {
-      // 3. Atomic state transition in PostgreSQL
       const res = await pool.query(
         `UPDATE tasks
          SET status = 'ACCEPTED', assigned_worker_id = $1, updated_at = $2
@@ -589,7 +608,6 @@ export const db = {
         return { success: false, error: `Task cannot be accepted from status '${t.status}'`, code: 400 };
       }
 
-      // Update existing offer row
       await pool.query(
         `UPDATE task_offers
          SET status = 'ACCEPTED', responded_at = $1
@@ -599,7 +617,6 @@ export const db = {
 
       return { success: true, task: res.rows[0] };
     } else {
-      // In-Memory atomic transition
       const memTask = memStore.tasks.get(taskId);
       if (!memTask) return { success: false, error: `Task ${taskId} not found`, code: 404 };
 
@@ -634,6 +651,7 @@ export const db = {
     workerId: string,
     workerToken?: string
   ): Promise<{ success: boolean; task?: TaskRow; error?: string; code?: number }> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     const now = new Date().toISOString();
 
@@ -676,7 +694,7 @@ export const db = {
     }
   },
 
-  // Submit Result & Complete Task (Atomic Duplicate Prevention)
+  // 2. Transactional Result Submission (Strict Atomic BEGIN / COMMIT / ROLLBACK)
   async submitTaskResult(params: {
     id: string;
     taskId: string;
@@ -684,6 +702,7 @@ export const db = {
     workerToken?: string;
     resultPayload: Record<string, unknown>;
   }): Promise<{ success: boolean; task?: TaskRow; result?: TaskResultRow; error?: string; code?: number }> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     const now = new Date().toISOString();
 
@@ -695,11 +714,11 @@ export const db = {
     }
 
     if (pool) {
-      const client = await pool.connect();
+      const client: PoolClient = await pool.connect();
       try {
         await client.query("BEGIN");
 
-        // Atomic check and transition from IN_PROGRESS to COMPLETED
+        // 1. Atomically verify worker assignment & transition task state from IN_PROGRESS to COMPLETED
         const taskUpdateRes = await client.query(
           `UPDATE tasks
            SET status = 'COMPLETED', updated_at = $1
@@ -710,7 +729,7 @@ export const db = {
 
         if (taskUpdateRes.rows.length === 0) {
           await client.query("ROLLBACK");
-          // Check reason for failure
+          // Determine exact reason for conflict
           const existing = await pool.query(`SELECT * FROM tasks WHERE id = $1`, [params.taskId]);
           if (existing.rows.length === 0) return { success: false, error: "Task not found", code: 404 };
           const t = existing.rows[0];
@@ -724,7 +743,7 @@ export const db = {
           return { success: false, error: `Cannot submit result for task in status '${t.status}'`, code: 400 };
         }
 
-        // Insert result row
+        // 2. Insert result payload with UNIQUE(task_id) constraint
         const resultRes = await client.query(
           `INSERT INTO task_results (id, task_id, worker_id, result_payload, submitted_at, accepted_at)
            VALUES ($1, $2, $3, $4, $5, $5)
@@ -738,7 +757,26 @@ export const db = {
           return { success: false, error: "Task result already submitted", code: 409 };
         }
 
+        // 3. Atomically persist task lifecycle events within the SAME database transaction
+        const evtSubmittedId = `evt_${Date.now()}_sub_${Math.random().toString(36).substring(2, 7)}`;
+        const evtCompletedId = `evt_${Date.now()}_cmp_${Math.random().toString(36).substring(2, 7)}`;
+
+        await client.query(
+          `INSERT INTO events (id, event_type, entity_type, entity_id, payload, created_at)
+           VALUES ($1, 'task_submitted', 'task', $2, $3, $4),
+                  ($5, 'task_completed', 'task', $2, $6, $4)`,
+          [
+            evtSubmittedId,
+            params.taskId,
+            JSON.stringify({ worker_id: params.workerId, result_id: params.id, timestamp: now }),
+            now,
+            evtCompletedId,
+            JSON.stringify({ worker_id: params.workerId, result_id: params.id, status: "COMPLETED", timestamp: now }),
+          ]
+        );
+
         await client.query("COMMIT");
+
         return {
           success: true,
           task: taskUpdateRes.rows[0],
@@ -746,7 +784,7 @@ export const db = {
         };
       } catch (err: any) {
         await client.query("ROLLBACK");
-        if (err.code === "23505") { // unique constraint violation
+        if (err.code === "23505") { // unique violation
           return { success: false, error: "Task result already submitted", code: 409 };
         }
         throw err;
@@ -794,6 +832,7 @@ export const db = {
 
   // Get Result
   async getTaskResult(taskId: string): Promise<TaskResultRow | null> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(`SELECT * FROM task_results WHERE task_id = $1 LIMIT 1`, [taskId]);
@@ -810,6 +849,7 @@ export const db = {
     entityId: string;
     payload?: Record<string, unknown>;
   }): Promise<EventRow> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     const now = new Date().toISOString();
     const row: EventRow = {
@@ -834,6 +874,7 @@ export const db = {
   },
 
   async getEvents(entityId?: string): Promise<EventRow[]> {
+    checkProductionDbSafety();
     const pool = getPgPool();
     if (pool) {
       const sql = entityId

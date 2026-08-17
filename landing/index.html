@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Human capability for AI agents | Human Tool</title>
+  <meta name="description" content="Human Tool provides AI agents with access to qualified human judgment, expertise, verification and real-world execution as infrastructure. Private Alpha." />
+  <meta name="robots" content="index, follow" />
+  <link rel="stylesheet" href="/assets/style.css" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "name": "Human Tool",
+        "description": "Human capability as infrastructure for AI agents. AI agents can request qualified human judgment, verification, professional expertise and physical-world execution as an outcome.",
+        "@id": "/"
+      },
+      {
+        "@type": "WebSite",
+        "name": "Human Tool",
+        "description": "Human capability for AI agents. Private Alpha.",
+        "url": "/",
+        "inLanguage": "en"
+      }
+    ]
+  }
+  </script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <a class="brand" href="/">Human Tool</a>
+      <nav class="site-nav" aria-label="Main navigation">
+        <span class="badge" aria-label="Current status">Private Alpha</span>
+        <a href="/for-agents">For Agents</a>
+        <a href="/docs">Docs</a>
+        <a href="/use-cases">Use Cases</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="container">
+      <p class="status-line">Human capability for AI agents</p>
+      <h1>Give your AI access to human judgment, expertise, verification and real-world execution.</h1>
+      <p class="lead">AI agents can use qualified humans when they need expert judgment, verification, professional expertise, high-confidence review or physical-world execution.</p>
+
+      <div class="notice">
+        <strong>Status: Private Alpha.</strong> The agent-facing API and MCP interface are in active development. The task types and prices below are the current alpha catalogue and may change. No public access yet.
+      </div>
+
+      <h2>How it works</h2>
+      <p>An AI agent requests an <strong>outcome</strong>, not a freelancer. The platform classifies the task, selects a qualified human, delivers a structured result back to the agent, and the agent continues its workflow.</p>
+
+      <div class="flow" role="list" aria-label="Agent to human capability flow">
+        <div class="flow-step" role="listitem">
+          <span class="step-code">1</span>
+          AI cannot complete the task reliably on its own.
+        </div>
+        <div class="flow-step" role="listitem">
+          <span class="step-code">2</span>
+          AI requests human capability as a tool call.
+        </div>
+        <div class="flow-step" role="listitem">
+          <span class="step-code">3</span>
+          A qualified human executes the critical part.
+        </div>
+        <div class="flow-step" role="listitem">
+          <span class="step-code">4</span>
+          A structured result returns to the AI.
+        </div>
+        <div class="flow-step" role="listitem">
+          <span class="step-code">5</span>
+          AI continues the workflow.
+        </div>
+      </div>
+
+      <p>Conceptually, an agent will call <code>quote_human()</code>, <code>call_human()</code> and <code>get_result()</code>. See <a href="/docs">the docs</a> for the conceptual interface.</p>
+
+      <h2>Current task types</h2>
+      <p>Three capability categories are in the alpha catalogue today. Prices are starting hypotheses, not commitments.</p>
+
+      <div class="grid">
+        <div class="card">
+          <h3>LANDING_PAGE_REVIEW</h3>
+          <p>Human UX/CRO expert reviews a landing page.</p>
+          <p><a href="/for-agents#landing-page-review">Details</a></p>
+          <span class="meta">From $39 · ~30 min SLA</span>
+        </div>
+        <div class="card">
+          <h3>ARCHITECTURE_SANITY_CHECK</h3>
+          <p>Senior engineer reviews a software architecture.</p>
+          <p><a href="/for-agents#architecture-sanity-check">Details</a></p>
+          <span class="meta">From $69 · ~60 min SLA</span>
+        </div>
+        <div class="card">
+          <h3>EXPERT_FACT_VERIFICATION</h3>
+          <p>Human expert verifies an AI-produced claim.</p>
+          <p><a href="/for-agents#expert-fact-verification">Details</a></p>
+          <span class="meta">From $29 · ~30 min SLA</span>
+        </div>
+      </div>
+
+      <h2>What we are building</h2>
+      <p>Human Tool is <strong>human capability infrastructure for AI agents</strong>. We are not building a marketplace where AI hires freelancers. The agent-facing product sells a result: a verified conclusion, a reviewed artifact, a structured expert finding.</p>
+      <p>Use cases include: a coding agent requesting a senior architecture review, a founder having a lawyer verify only the uncertain clauses of a contract, a research agent asking an industry expert to verify one critical assumption. See <a href="/use-cases">use cases</a>.</p>
+
+      <hr />
+
+      <h2>Status</h2>
+      <p>We are in <strong>private alpha</strong>. The API / MCP interface is in development and is not publicly available yet. Task types currently in the alpha catalogue:</p>
+      <ul>
+        <li><strong>LANDING_PAGE_REVIEW</strong></li>
+        <li><strong>ARCHITECTURE_SANITY_CHECK</strong></li>
+        <li><strong>EXPERT_FACT_VERIFICATION</strong></li>
+      </ul>
+      <p>Legal expert checks and physical-world verification are planned for later private pilots.</p>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <span>Human Tool — human capability as infrastructure for AI agents.</span>
+      <span>
+        <a href="/for-agents">For Agents</a> · <a href="/docs">Docs</a> · <a href="/use-cases">Use Cases</a> · <a href="/robots.txt">robots.txt</a> · <a href="/sitemap.xml">sitemap.xml</a>
+      </span>
+    </div>
+  </footer>
+</body>
+</html>

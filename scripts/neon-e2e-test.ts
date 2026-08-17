@@ -2,283 +2,201 @@ import { loadEnvConfig } from "@next/env";
 loadEnvConfig(process.cwd());
 
 import { Pool } from "pg";
-import { db } from "../src/db";
-import { logEvent } from "../src/lib/events";
-import { validateTaskInput, validateTaskResult } from "../src/lib/schemas";
-import { canTransition } from "../src/lib/state-machine";
+import { requestQuote } from "../src/services/quotes";
+import { createTaskFromQuote, acceptTask, startTask, submitTaskResult, getTaskResult } from "../src/services/tasks";
+import { ServiceError } from "../src/lib/errors";
 
-async function runNeonE2ETest() {
+async function runHardenedNeonE2ETest() {
   console.log("==================================================================");
-  console.log("  STARTING SPRINT 1 P0/P1 HARDENED E2E TEST (REAL NEON POSTGRES)  ");
+  console.log("  STARTING SPRINT 1.1 FINAL HARDENING E2E (REAL NEON POSTGRES)    ");
   console.log("==================================================================");
 
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
-    console.error("FATAL: DATABASE_URL is not set! Aborting real Neon test.");
+    console.error("FATAL: DATABASE_URL is not set! Aborting test.");
     process.exit(1);
   }
 
-  const urlObj = new URL(databaseUrl);
-  console.log(`[Neon DB Target] Host: ${urlObj.hostname}, DB: ${urlObj.pathname.replace("/", "")}`);
-
   const rawPool = new Pool({
     connectionString: databaseUrl,
-    ssl: { rejectUnauthorized: false },
+    ssl: true,
   });
 
   const ping = await rawPool.query("SELECT current_database(), current_user, NOW() as db_time, version()");
   console.log(`[Neon DB Connected] DB: ${ping.rows[0].current_database}, User: ${ping.rows[0].current_user}`);
-  console.log(`[PostgreSQL Version] ${ping.rows[0].version.split(",")[0]}`);
   console.log("------------------------------------------------------------------");
 
-  const runId = Date.now().toString().slice(-6);
-  const quoteId = `quote_e2e_p1_${runId}`;
-  const taskId = `task_e2e_p1_${runId}`;
-  const resultId = `res_e2e_p1_${runId}`;
+  // 1. Verify schema_migrations table
+  console.log("\n[1/10] Verifying schema_migrations tracking in Neon...");
+  const migRes = await rawPool.query("SELECT version, applied_at FROM schema_migrations ORDER BY version ASC");
+  console.log("Applied migrations in Neon:", migRes.rows.map((r) => r.version));
+  if (migRes.rows.length < 3) {
+    throw new Error(`Expected at least 3 migrations in schema_migrations! Found: ${migRes.rows.length}`);
+  }
+  console.log("✓ Numbered migrations verified in schema_migrations table");
 
-  // 1. Create a real quote in Neon
-  console.log("\n[1/13] Creating real quote in Neon PostgreSQL...");
-  const quotePayload = {
-    architecture_summary: "Distributed event-driven agent pipeline with Neon Postgres persistence and connection pooler.",
-    components: ["Next.js App Router", "Neon Postgres (PgBouncer)", "Worker UI", "REST API"],
-    expected_scale: "25,000 tasks/day with p95 response time < 250ms",
-    key_concerns: ["Connection pool saturation under burst loads", "Atomic state updates on worker acceptance"],
-  };
-
-  const inputValidation = validateTaskInput("ARCHITECTURE_SANITY_CHECK", quotePayload);
-  if (!inputValidation.success) throw new Error("Input validation failed");
-
-  const taskType = await db.getTaskType("ARCHITECTURE_SANITY_CHECK");
-  if (!taskType) throw new Error("Task type ARCHITECTURE_SANITY_CHECK not found in Neon");
-
-  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-  await logEvent("quote_requested", "quote", quoteId, { task_type: "ARCHITECTURE_SANITY_CHECK", input_payload: quotePayload });
-  const createdQuote = await db.createQuote({
-    id: quoteId,
-    task_type_id: "ARCHITECTURE_SANITY_CHECK",
-    input_payload: quotePayload,
-    quoted_price_usd: taskType.customer_price_usd,
-    target_payout_usd: taskType.target_payout_usd,
-    estimated_minutes: taskType.default_sla_minutes,
-    expires_at: expiresAt,
+  // 2. Request Quote through Service Layer
+  console.log("\n[2/10] Requesting quote via service layer (sanitized agent output)...");
+  const quoteRes = await requestQuote({
+    task_type: "ARCHITECTURE_SANITY_CHECK",
+    input_payload: {
+      architecture_summary: "High-scale serverless agent runner connected to Neon Postgres with transactional pooling.",
+      components: ["Next.js App Router", "Neon Postgres Serverless", "REST API", "Service Layer"],
+      expected_scale: "50,000 tasks/day",
+      key_concerns: ["Connection pool exhaustion", "Duplicate submission race conditions"],
+    },
   });
-  await logEvent("quote_created", "quote", quoteId, { quoted_price_usd: createdQuote.quoted_price_usd, expires_at: expiresAt });
 
-  console.log(`✓ Quote created: ${createdQuote.id} ($${createdQuote.quoted_price_usd} USD, SLA: ${createdQuote.estimated_minutes}m)`);
+  if ((quoteRes as any).target_payout_usd !== undefined) {
+    throw new Error("Agent-facing quote response leaked target_payout_usd!");
+  }
+  console.log(`✓ Quote created: ${quoteRes.quote_id} ($${quoteRes.customer_price_usd} USD, SLA: ${quoteRes.estimated_minutes}m)`);
+  console.log(`✓ Verified target_payout_usd is NOT exposed to agents`);
 
-  // 2. Create a task from that quote in Neon & Verify Idempotency
-  console.log("\n[2/13] Testing atomic task creation and database-level idempotency in Neon...");
-  const createRes1 = await db.createTask({
-    id: taskId,
-    quote_id: createdQuote.id,
-    task_type_id: createdQuote.task_type_id,
-    input_payload: createdQuote.input_payload,
-  });
-  if (createRes1.is_existing) throw new Error("First task creation should be new");
-  await logEvent("task_created", "task", taskId, { quote_id: createdQuote.id, status: createRes1.task.status });
+  // 3. Create Task & Verify Idempotency in Neon
+  console.log("\n[3/10] Creating task and testing idempotent creation in Neon...");
+  const taskRes1 = await createTaskFromQuote({ quote_id: quoteRes.quote_id });
+  if (taskRes1.is_existing) throw new Error("First task creation must be new");
 
-  // Concurrent second task creation with same quote_id must be idempotent
-  const createRes2 = await db.createTask({
-    id: `task_dup_${runId}`,
-    quote_id: createdQuote.id,
-    task_type_id: createdQuote.task_type_id,
-    input_payload: createdQuote.input_payload,
-  });
-  if (!createRes2.is_existing || createRes2.task.id !== taskId) {
+  const taskRes2 = await createTaskFromQuote({ quote_id: quoteRes.quote_id });
+  if (!taskRes2.is_existing || taskRes2.task_id !== taskRes1.task_id) {
     throw new Error("Repeated task creation from same quote failed idempotency!");
   }
-  console.log(`✓ Task created: ${createRes1.task.id} (Status: ${createRes1.task.status})`);
-  console.log(`✓ Repeated creation idempotently returned existing task (is_existing = true)`);
+  console.log(`✓ Task created: ${taskRes1.task_id} (Status: ${taskRes1.status})`);
+  console.log(`✓ Idempotent return verified for repeated creation`);
 
-  // 3. Verify task_offers in Neon for all qualified workers
-  console.log("\n[3/13] Verifying task_offers rows persisted in Neon for all qualified workers...");
-  const offersInDb = await rawPool.query(
-    "SELECT worker_id, status, worker_token_hash FROM task_offers WHERE task_id = $1 ORDER BY worker_id ASC",
-    [taskId]
-  );
-  console.log(`Found ${offersInDb.rows.length} task_offers rows in Neon:`, offersInDb.rows.map((r) => r.worker_id));
-  if (offersInDb.rows.length < 2) throw new Error("Expected at least 2 task_offers rows in Neon");
-
-  for (const offer of createRes1.offers) {
-    await logEvent("task_offered", "task", taskId, {
-      worker_id: offer.worker_id,
-      target_payout_usd: createdQuote.target_payout_usd,
-    });
+  // 4. Test Incapable Worker Acceptance (403 + WORKER_CAPABILITY_REQUIRED)
+  console.log("\n[4/10] Testing incapable worker acceptance enforcement in Neon...");
+  try {
+    await acceptTask(taskRes1.task_id, { worker_id: "w_alex_ux" });
+    throw new Error("Should have thrown WORKER_CAPABILITY_REQUIRED error");
+  } catch (err: any) {
+    if (!(err instanceof ServiceError) || err.code !== "WORKER_CAPABILITY_REQUIRED" || err.status !== 403) {
+      throw new Error(`Expected WORKER_CAPABILITY_REQUIRED (403), got: ${err.code} (${err.status})`);
+    }
+    console.log(`✓ Incapable worker correctly rejected with: ${err.code} (${err.status})`);
   }
-  console.log(`✓ Verified each offered worker has unique offer row with SHA-256 token hash`);
 
-  // 4. Test Incapable Worker Acceptance Rejection (403 Forbidden)
-  console.log("\n[4/13] Testing incapable worker acceptance rejection...");
-  const incapableAccept = await db.acceptTask(taskId, "w_alex_ux"); // w_alex_ux has UX, not ARCHITECTURE
-  if (incapableAccept.success || incapableAccept.code !== 403) {
-    throw new Error(`Incapable worker accept should return 403! Got ${incapableAccept.code}`);
+  // 5. Test Worker Offer Token Authorization Boundary
+  console.log("\n[5/10] Testing worker offer token authorization boundary...");
+  try {
+    await acceptTask(taskRes1.task_id, { worker_id: "w_sam_arch" }, "invalid_worker_token");
+    throw new Error("Should have thrown WORKER_NOT_AUTHORIZED error");
+  } catch (err: any) {
+    if (!(err instanceof ServiceError) || err.code !== "WORKER_NOT_AUTHORIZED" || err.status !== 401) {
+      throw new Error(`Expected WORKER_NOT_AUTHORIZED (401), got: ${err.code} (${err.status})`);
+    }
+    console.log(`✓ Invalid worker token rejected with: ${err.code} (${err.status})`);
   }
-  console.log(`✓ Incapable worker correctly rejected with HTTP 403: "${incapableAccept.error}"`);
 
-  // 5. Test Worker Offer Token Authorization Boundary (401 Unauthorized)
-  console.log("\n[5/13] Testing worker offer token authorization boundary...");
-  const wrongTokenAccept = await db.acceptTask(taskId, "w_sam_arch", "invalid_worker_token_123");
-  if (wrongTokenAccept.success || wrongTokenAccept.code !== 401) {
-    throw new Error(`Invalid worker token accept should return 401! Got ${wrongTokenAccept.code}`);
-  }
-  console.log(`✓ Invalid worker token correctly rejected with HTTP 401: "${wrongTokenAccept.error}"`);
+  // 6. Test Concurrent Worker Acceptance in Neon (Exactly One 200, One 409 TASK_ALREADY_ACCEPTED)
+  console.log("\n[6/10] Testing concurrent worker acceptance in Neon...");
+  const offerSam = taskRes1.offers?.find((o) => o.worker_id === "w_sam_arch");
+  const offerMorgan = taskRes1.offers?.find((o) => o.worker_id === "w_morgan_general");
 
-  // 6. Trigger TWO concurrent acceptance attempts against the SAME task
-  console.log("\n[6/13] Triggering TWO concurrent acceptance attempts against the SAME task in Neon...");
-  const offerSam = createRes1.offers.find((o) => o.worker_id === "w_sam_arch");
-  const offerMorgan = createRes1.offers.find((o) => o.worker_id === "w_morgan_general");
-
-  const [attempt1, attempt2] = await Promise.all([
-    db.acceptTask(taskId, "w_sam_arch", offerSam?.worker_token),
-    db.acceptTask(taskId, "w_morgan_general", offerMorgan?.worker_token),
+  const [acc1, acc2] = await Promise.allSettled([
+    acceptTask(taskRes1.task_id, { worker_id: "w_sam_arch" }, offerSam?.worker_token),
+    acceptTask(taskRes1.task_id, { worker_id: "w_morgan_general" }, offerMorgan?.worker_token),
   ]);
 
-  const successCount = [attempt1, attempt2].filter((a) => a.success).length;
-  const conflictCount = [attempt1, attempt2].filter((a) => !a.success && a.code === 409).length;
+  const accSuccess = [acc1, acc2].filter((r) => r.status === "fulfilled");
+  const accConflict = [acc1, acc2].filter((r) => r.status === "rejected") as PromiseRejectedResult[];
 
-  if (successCount !== 1 || conflictCount !== 1) {
-    throw new Error(`Expected exactly 1 winner and 1 409 conflict! Got: success=${successCount}, conflict=${conflictCount}`);
+  if (accSuccess.length !== 1 || accConflict.length !== 1) {
+    throw new Error(`Expected 1 success and 1 conflict! Got: success=${accSuccess.length}, conflict=${accConflict.length}`);
+  }
+  if (accConflict[0].reason.code !== "TASK_ALREADY_ACCEPTED") {
+    throw new Error(`Expected TASK_ALREADY_ACCEPTED code, got ${accConflict[0].reason.code}`);
   }
 
-  const winningWorker = attempt1.success ? "w_sam_arch" : "w_morgan_general";
-  const winningToken = attempt1.success ? offerSam?.worker_token : offerMorgan?.worker_token;
+  const winningWorker = acc1.status === "fulfilled" ? "w_sam_arch" : "w_morgan_general";
+  const winningToken = acc1.status === "fulfilled" ? offerSam?.worker_token : offerMorgan?.worker_token;
   console.log(`✓ Exactly one worker succeeded: ${winningWorker}`);
-  console.log(`✓ Losing worker received HTTP 409 Conflict`);
+  console.log(`✓ Losing worker received HTTP 409 with stable code: TASK_ALREADY_ACCEPTED`);
 
-  await logEvent("task_accepted", "task", taskId, { worker_id: winningWorker });
+  // 7. Start the Task
+  console.log("\n[7/10] Starting task via service layer...");
+  const startRes = await startTask(taskRes1.task_id, { worker_id: winningWorker }, winningToken);
+  console.log(`✓ Task is now IN_PROGRESS assigned to ${startRes.assigned_worker_id}`);
 
-  // 7. Start the task
-  console.log("\n[7/13] Starting task in Neon...");
-  const startRes = await db.startTask(taskId, winningWorker, winningToken);
-  if (!startRes.success || startRes.task?.status !== "IN_PROGRESS") {
-    throw new Error(`Start task failed: ${startRes.error}`);
-  }
-  await logEvent("task_started", "task", taskId, { worker_id: winningWorker, status: "IN_PROGRESS" });
-  console.log(`✓ Task is now IN_PROGRESS assigned to ${winningWorker}`);
-
-  // 8. Submit valid structured result with atomic duplicate protection
-  console.log("\n[8/13] Testing atomic submission with duplicate prevention...");
+  // 8. Atomic Transactional Result Submission
+  console.log("\n[8/10] Testing atomic single-transaction result submission in Neon...");
   const structuredResult = {
     verdict: "acceptable" as const,
-    critical_issues: [
-      "PgBouncer transaction pooling must be enabled for serverless lambda scaling to prevent connection exhaustion.",
-    ],
-    recommended_changes: [
-      "Use @neondatabase/serverless connection caching with pooled connection string",
-      "Add retry with jitter for connection timeouts during cold starts",
-    ],
-    scaling_risks: [
-      "Single-region PostgreSQL pooler latency for non-US agent requests",
-    ],
-    confidence: 0.95,
+    critical_issues: ["Enable transaction pooler to prevent idle socket leaks on serverless restarts"],
+    recommended_changes: ["Configure connection timeout to 10s with max 20 client limit"],
+    scaling_risks: ["Multi-region query round-trips"],
+    confidence: 0.96,
   };
 
-  // Run two concurrent submissions
-  const [sub1, sub2] = await Promise.all([
-    db.submitTaskResult({ id: `${resultId}_1`, taskId, workerId: winningWorker, workerToken: winningToken, resultPayload: structuredResult }),
-    db.submitTaskResult({ id: `${resultId}_2`, taskId, workerId: winningWorker, workerToken: winningToken, resultPayload: structuredResult }),
+  const [sub1, sub2] = await Promise.allSettled([
+    submitTaskResult(taskRes1.task_id, { worker_id: winningWorker, result_payload: structuredResult }, winningToken),
+    submitTaskResult(taskRes1.task_id, { worker_id: winningWorker, result_payload: structuredResult }, winningToken),
   ]);
 
-  const subSuccessCount = [sub1, sub2].filter((s) => s.success).length;
-  const subConflictCount = [sub1, sub2].filter((s) => !s.success && s.code === 409).length;
+  const subSuccess = [sub1, sub2].filter((r) => r.status === "fulfilled");
+  const subConflict = [sub1, sub2].filter((r) => r.status === "rejected") as PromiseRejectedResult[];
 
-  if (subSuccessCount !== 1 || subConflictCount !== 1) {
-    throw new Error(`Expected exactly 1 submission success and 1 409 conflict! Got: success=${subSuccessCount}, conflict=${subConflictCount}`);
+  if (subSuccess.length !== 1 || subConflict.length !== 1) {
+    throw new Error(`Expected 1 submission success and 1 conflict! Got: success=${subSuccess.length}, conflict=${subConflict.length}`);
   }
-  console.log(`✓ Atomic submission: exactly 1 succeeded, concurrent duplicate returned HTTP 409 (never 500)`);
-
-  await logEvent("task_submitted", "task", taskId, { worker_id: winningWorker, result_id: resultId });
-  await logEvent("task_completed", "task", taskId, { worker_id: winningWorker, result_id: resultId, status: "COMPLETED" });
-
-  // 9. Verify Agent Task Token Authorization on Result Retrieval
-  console.log("\n[9/13] Testing agent token authorization boundary on result retrieval...");
-  const unauthorizedCheck = await db.verifyAgentToken(taskId, "atk_invalid_fake_token");
-  if (unauthorizedCheck) throw new Error("Invalid agent token should not pass verification");
-
-  const authorizedCheck = await db.verifyAgentToken(taskId, createRes1.agent_token);
-  if (!authorizedCheck) throw new Error("Valid agent token must pass verification");
-
-  const retrievedResult = await db.getTaskResult(taskId);
-  if (!retrievedResult) throw new Error("Result could not be retrieved from Neon");
-  await logEvent("result_retrieved", "task_result", retrievedResult.id, { task_id: taskId, worker_id: winningWorker });
-  console.log(`✓ Agent token authorization verified; result retrieved: verdict="${(retrievedResult.result_payload as any).verdict}"`);
-
-  // 10. Verify Lifecycle Events Persisted in Neon
-  console.log("\n[10/13] Verifying complete lifecycle event sequence persisted in Neon...");
-  const eventRows = await db.getEvents(taskId);
-  const eventTypes = eventRows.map((e) => e.event_type);
-  console.log(`Events in Neon for task ${taskId}:`, eventTypes);
-
-  const requiredEvents = [
-    "task_created",
-    "task_offered",
-    "task_accepted",
-    "task_started",
-    "task_submitted",
-    "task_completed",
-  ];
-  for (const expected of requiredEvents) {
-    if (!eventTypes.includes(expected)) throw new Error(`Missing expected event: ${expected}`);
+  if (subConflict[0].reason.code !== "RESULT_ALREADY_SUBMITTED") {
+    throw new Error(`Expected RESULT_ALREADY_SUBMITTED code, got ${subConflict[0].reason.code}`);
   }
-  console.log(`✓ All lifecycle events recorded and verified in Neon!`);
+  console.log(`✓ Atomic single transaction: exactly 1 succeeded, concurrent duplicate rejected with RESULT_ALREADY_SUBMITTED (409)`);
 
-  // 11. Direct raw SQL queries against Neon
-  console.log("\n[11/13] Executing direct raw SQL queries against Neon PostgreSQL...");
-  const directTask = await rawPool.query("SELECT * FROM tasks WHERE id = $1", [taskId]);
-  const directResult = await rawPool.query("SELECT * FROM task_results WHERE task_id = $1", [taskId]);
-  const directOffers = await rawPool.query("SELECT worker_id, status FROM task_offers WHERE task_id = $1", [taskId]);
-  const directEvents = await rawPool.query("SELECT event_type, created_at FROM events WHERE entity_id = $1 ORDER BY created_at ASC", [taskId]);
+  // 9. Agent Token Authorization Boundary on Result Access
+  console.log("\n[9/10] Testing agent token authorization boundary on result retrieval...");
+  try {
+    await getTaskResult(taskRes1.task_id, "atk_bad_token_123");
+    throw new Error("Should have thrown UNAUTHORIZED");
+  } catch (err: any) {
+    if (!(err instanceof ServiceError) || err.code !== "UNAUTHORIZED" || err.status !== 401) {
+      throw new Error(`Expected UNAUTHORIZED (401), got: ${err.code} (${err.status})`);
+    }
+    console.log(`✓ Unauthorized agent token correctly rejected with: ${err.code} (401)`);
+  }
 
-  console.log(`--- DIRECT RAW NEON POSTGRESQL ROW SUMMARY ---`);
-  console.log(`tasks row:`, {
-    id: directTask.rows[0].id,
-    quote_id: directTask.rows[0].quote_id,
-    task_type_id: directTask.rows[0].task_type_id,
-    status: directTask.rows[0].status,
-    assigned_worker_id: directTask.rows[0].assigned_worker_id,
-    has_agent_token_hash: Boolean(directTask.rows[0].agent_token_hash),
-  });
-  console.log(`task_results row:`, {
-    id: directResult.rows[0].id,
-    task_id: directResult.rows[0].task_id,
-    worker_id: directResult.rows[0].worker_id,
-    verdict: directResult.rows[0].result_payload.verdict,
-  });
-  console.log(`task_offers rows count:`, directOffers.rows.length);
-  console.log(`events rows count:`, directEvents.rows.length);
+  const validResult = await getTaskResult(taskRes1.task_id, taskRes1.agent_token);
+  console.log(`✓ Authorized result retrieved: status=${validResult.status}, verdict="${(validResult.result as any).verdict}"`);
 
-  // 12. Additional edge case checks
-  console.log("\n[12/13] Additional edge-case validations...");
-  const isExp = new Date(new Date(Date.now() - 5000).toISOString()).getTime() < Date.now();
-  console.log(`✓ Expired quote detection: ${isExp}`);
-  const badVal = validateTaskResult("ARCHITECTURE_SANITY_CHECK", { verdict: "invalid", confidence: 2.0 });
-  console.log(`✓ Malformed result rejected by Zod schema: ${!badVal.success}`);
-  const invalidTransition = canTransition("COMPLETED", "IN_PROGRESS");
-  console.log(`✓ Invalid transition COMPLETED -> IN_PROGRESS rejected: ${!invalidTransition}`);
+  // 10. Direct Database State Invariant Assertions
+  console.log("\n[10/10] Direct SQL Invariant Verification in Neon PostgreSQL...");
+  const dbTask = await rawPool.query("SELECT * FROM tasks WHERE id = $1", [taskRes1.task_id]);
+  const dbResult = await rawPool.query("SELECT * FROM task_results WHERE task_id = $1", [taskRes1.task_id]);
+  const dbEvents = await rawPool.query("SELECT event_type FROM events WHERE entity_id = $1 ORDER BY created_at ASC", [taskRes1.task_id]);
+
+  if (dbTask.rows[0].status !== "COMPLETED") throw new Error("Task status is not COMPLETED in Neon");
+  if (dbResult.rows.length !== 1) throw new Error("Task results row missing in Neon");
+  if (dbEvents.rows.length < 5) throw new Error("Missing lifecycle events in Neon");
+
+  console.log("--- DIRECT NEON RAW STATE ---");
+  console.log(`Task: ${dbTask.rows[0].id} (Status: ${dbTask.rows[0].status}, Worker: ${dbTask.rows[0].assigned_worker_id})`);
+  console.log(`Result: ${dbResult.rows[0].id} (Verdict: ${dbResult.rows[0].result_payload.verdict})`);
+  console.log(`Events recorded in Neon:`, dbEvents.rows.map((r) => r.event_type));
 
   await rawPool.end();
 
   console.log("\n==================================================================");
-  console.log("  ALL P0 AND P1 CHECKS PASSED AGAINST REAL NEON POSTGRESQL        ");
+  console.log("  ALL HARDENED SPRINT 1.1 VERIFICATIONS PASSED IN NEON POSTGRES  ");
   console.log("==================================================================");
 
   return {
-    taskId,
-    quoteId,
+    taskId: taskRes1.task_id,
+    quoteId: quoteRes.quote_id,
     winningWorker,
-    status: directTask.rows[0].status,
-    offersCount: directOffers.rows.length,
-    eventsCount: directEvents.rows.length,
+    status: dbTask.rows[0].status,
+    eventsCount: dbEvents.rows.length,
   };
 }
 
-runNeonE2ETest()
+runHardenedNeonE2ETest()
   .then((res) => {
-    console.log("\nFINAL REPORT SUMMARY:", res);
-    console.log("\nREAL NEON E2E: PASS");
+    console.log("\nFINAL HARDENING REPORT:", res);
+    console.log("\nHARDENED REAL NEON SUITE: PASS");
     process.exit(0);
   })
   .catch((err) => {
-    console.error("REAL NEON E2E: FAIL", err);
+    console.error("HARDENED REAL NEON SUITE: FAIL", err);
     process.exit(1);
   });

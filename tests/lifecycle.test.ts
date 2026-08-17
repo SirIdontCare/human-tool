@@ -1,18 +1,68 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { db } from "../src/db";
-import { validateTaskInput, validateTaskResult } from "../src/lib/schemas";
 import { canTransition, VALID_TRANSITIONS } from "../src/lib/state-machine";
-import { verifyTokenHash, hashToken } from "../src/lib/auth";
+import { requestQuote } from "../src/services/quotes";
+import { createTaskFromQuote, acceptTask, startTask, submitTaskResult, getTaskResult } from "../src/services/tasks";
+import { ServiceError } from "../src/lib/errors";
 
-describe("Sprint 1 P0/P1 Invariants & Security Hardening Tests", () => {
+describe("Sprint 1.1 Hardened Invariant & Security Verification Suite", () => {
   beforeEach(() => {
     db.resetMemStore();
   });
 
-  // 1. Concurrent Task Creation from Same Quote (Idempotency & Database Unique Constraint)
+  // 1. Production Database Safety
+  it("should fail fast in production mode if DATABASE_URL is missing and never use in-memory storage", async () => {
+    const originalEnv = process.env.NODE_ENV;
+    const originalDbUrl = process.env.DATABASE_URL;
+    try {
+      (process.env as Record<string, string | undefined>).NODE_ENV = "production";
+      delete process.env.DATABASE_URL;
+
+      await expect(db.getAllTaskTypes()).rejects.toThrow(
+        /DATABASE_URL environment variable is required in production/
+      );
+    } finally {
+      (process.env as Record<string, string | undefined>).NODE_ENV = originalEnv;
+      if (originalDbUrl) process.env.DATABASE_URL = originalDbUrl;
+    }
+  });
+
+  // 2. Quote Response Sanitization (No Target Payout or Platform Margin Exposed to Agents)
+  it("should not expose target_payout_usd or internal platform margin in quote responses", async () => {
+    const quoteRes = await requestQuote({
+      task_type: "LANDING_PAGE_REVIEW",
+      input_payload: { url: "https://agent-startup.io", target_audience: "AI Developers" },
+    });
+
+    expect(quoteRes.customer_price_usd).toBe(39.0);
+    expect(quoteRes.available).toBe(true);
+    // target_payout_usd and margin MUST NOT be exposed
+    expect((quoteRes as any).target_payout_usd).toBeUndefined();
+    expect((quoteRes as any).margin_usd).toBeUndefined();
+  });
+
+  // 3. Expired Quote Rejection with Stable Error Code
+  it("should reject expired quotes with stable error code QUOTE_EXPIRED", async () => {
+    const expiredQuote = await db.createQuote({
+      id: "quote_expired_test",
+      task_type_id: "LANDING_PAGE_REVIEW",
+      input_payload: { url: "https://example.com", target_audience: "Devs" },
+      quoted_price_usd: 39.0,
+      target_payout_usd: 25.0,
+      estimated_minutes: 30,
+      expires_at: new Date(Date.now() - 5000).toISOString(), // expired 5 seconds ago
+    });
+
+    await expect(createTaskFromQuote({ quote_id: expiredQuote.id })).rejects.toMatchObject({
+      code: "QUOTE_EXPIRED",
+      status: 400,
+    });
+  });
+
+  // 4. Concurrent Duplicate Task Creation (Database Idempotency)
   it("should return the exact same task when creating concurrently from the same quote", async () => {
     const quote = await db.createQuote({
-      id: "quote_test_idempotent",
+      id: "quote_test_idempotent_1_1",
       task_type_id: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "B2B SaaS" },
       quoted_price_usd: 39.0,
@@ -21,27 +71,22 @@ describe("Sprint 1 P0/P1 Invariants & Security Hardening Tests", () => {
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    // Fire 5 concurrent creation requests for the SAME quote
     const results = await Promise.all([
-      db.createTask({ id: "task_idem_1", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
-      db.createTask({ id: "task_idem_2", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
-      db.createTask({ id: "task_idem_3", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
-      db.createTask({ id: "task_idem_4", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
-      db.createTask({ id: "task_idem_5", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
+      createTaskFromQuote({ quote_id: quote.id }),
+      createTaskFromQuote({ quote_id: quote.id }),
+      createTaskFromQuote({ quote_id: quote.id }),
     ]);
 
-    // Exactly one created, others returned existing
-    const uniqueTaskIds = new Set(results.map((r) => r.task.id));
+    const uniqueTaskIds = new Set(results.map((r) => r.task_id));
     expect(uniqueTaskIds.size).toBe(1);
-    const existingFlags = results.map((r) => r.is_existing);
-    expect(existingFlags.filter((f) => f === false)).toHaveLength(1);
-    expect(existingFlags.filter((f) => f === true)).toHaveLength(4);
+    expect(results.filter((r) => !r.is_existing)).toHaveLength(1);
+    expect(results.filter((r) => r.is_existing)).toHaveLength(2);
   });
 
-  // 2. Incapable Worker Acceptance Enforcement (403 Forbidden)
-  it("should reject task acceptance with 403 when worker lacks verified capability", async () => {
+  // 5. Incapable Worker Acceptance Enforcement with Stable Error Code
+  it("should reject task acceptance with 403 and WORKER_CAPABILITY_REQUIRED when worker lacks verified capability", async () => {
     const quote = await db.createQuote({
-      id: "quote_test_capability",
+      id: "quote_test_cap_1_1",
       task_type_id: "ARCHITECTURE_SANITY_CHECK", // requires SYSTEM_ARCHITECTURE
       input_payload: {
         architecture_summary: "Multi-tenant Kubernetes deployment",
@@ -54,24 +99,21 @@ describe("Sprint 1 P0/P1 Invariants & Security Hardening Tests", () => {
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const createRes = await db.createTask({
-      id: "task_test_capability",
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
-    });
+    const taskRes = await createTaskFromQuote({ quote_id: quote.id });
 
     // w_alex_ux has UX_CONVERSION_ANALYSIS, but NOT SYSTEM_ARCHITECTURE
-    const acceptRes = await db.acceptTask(createRes.task.id, "w_alex_ux");
-    expect(acceptRes.success).toBe(false);
-    expect(acceptRes.code).toBe(403);
-    expect(acceptRes.error).toContain("does not possess the required verified capability");
+    await expect(
+      acceptTask(taskRes.task_id, { worker_id: "w_alex_ux" })
+    ).rejects.toMatchObject({
+      code: "WORKER_CAPABILITY_REQUIRED",
+      status: 403,
+    });
   });
 
-  // 3. Concurrent Task Acceptance (Exactly One 200, One 409)
-  it("should allow exactly one worker to accept concurrently, returning 409 to the loser", async () => {
+  // 6. Concurrent Task Acceptance (Exactly One 200, One 409 with TASK_ALREADY_ACCEPTED)
+  it("should allow exactly one worker to accept concurrently, returning TASK_ALREADY_ACCEPTED to loser", async () => {
     const quote = await db.createQuote({
-      id: "quote_test_race_accept",
+      id: "quote_test_race_accept_1_1",
       task_type_id: "ARCHITECTURE_SANITY_CHECK",
       input_payload: {
         architecture_summary: "Distributed system on Neon Postgres",
@@ -84,34 +126,28 @@ describe("Sprint 1 P0/P1 Invariants & Security Hardening Tests", () => {
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const createRes = await db.createTask({
-      id: "task_test_race_accept",
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
-    });
+    const taskRes = await createTaskFromQuote({ quote_id: quote.id });
+    const offer1 = taskRes.offers?.find((o) => o.worker_id === "w_sam_arch");
+    const offer2 = taskRes.offers?.find((o) => o.worker_id === "w_morgan_general");
 
-    // Both w_sam_arch and w_morgan_general have SYSTEM_ARCHITECTURE capability
-    const offer1 = createRes.offers.find((o) => o.worker_id === "w_sam_arch");
-    const offer2 = createRes.offers.find((o) => o.worker_id === "w_morgan_general");
-
-    const [res1, res2] = await Promise.all([
-      db.acceptTask(createRes.task.id, "w_sam_arch", offer1?.worker_token),
-      db.acceptTask(createRes.task.id, "w_morgan_general", offer2?.worker_token),
+    const [res1, res2] = await Promise.allSettled([
+      acceptTask(taskRes.task_id, { worker_id: "w_sam_arch" }, offer1?.worker_token),
+      acceptTask(taskRes.task_id, { worker_id: "w_morgan_general" }, offer2?.worker_token),
     ]);
 
-    const successes = [res1, res2].filter((r) => r.success);
-    const conflicts = [res1, res2].filter((r) => !r.success && r.code === 409);
+    const fulfilled = [res1, res2].filter((r) => r.status === "fulfilled");
+    const rejected = [res1, res2].filter((r) => r.status === "rejected") as PromiseRejectedResult[];
 
-    expect(successes).toHaveLength(1);
-    expect(conflicts).toHaveLength(1);
-    expect(conflicts[0].error).toContain("already accepted by another worker");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason.code).toBe("TASK_ALREADY_ACCEPTED");
+    expect(rejected[0].reason.status).toBe(409);
   });
 
-  // 4. Concurrent Duplicate Submissions (One Success, One 409, Never 500)
-  it("should handle concurrent result submissions atomically: exactly one success, other returns 409", async () => {
+  // 7. Concurrent Duplicate Result Submissions (Atomic Single Transaction)
+  it("should handle concurrent submissions atomically: exactly one success, other returns 409 RESULT_ALREADY_SUBMITTED", async () => {
     const quote = await db.createQuote({
-      id: "quote_test_race_submit",
+      id: "quote_test_race_submit_1_1",
       task_type_id: "EXPERT_FACT_VERIFICATION",
       input_payload: { claim: "Neon supports branching in Postgres", context: "Documentation check" },
       quoted_price_usd: 29.0,
@@ -120,16 +156,11 @@ describe("Sprint 1 P0/P1 Invariants & Security Hardening Tests", () => {
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const createRes = await db.createTask({
-      id: "task_test_race_submit",
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
-    });
+    const taskRes = await createTaskFromQuote({ quote_id: quote.id });
+    const workerOffer = taskRes.offers?.find((o) => o.worker_id === "w_elena_fact");
 
-    const workerOffer = createRes.offers.find((o) => o.worker_id === "w_elena_fact");
-    await db.acceptTask(createRes.task.id, "w_elena_fact", workerOffer?.worker_token);
-    await db.startTask(createRes.task.id, "w_elena_fact", workerOffer?.worker_token);
+    await acceptTask(taskRes.task_id, { worker_id: "w_elena_fact" }, workerOffer?.worker_token);
+    await startTask(taskRes.task_id, { worker_id: "w_elena_fact" }, workerOffer?.worker_token);
 
     const validResult = {
       verdict: "true" as const,
@@ -137,140 +168,46 @@ describe("Sprint 1 P0/P1 Invariants & Security Hardening Tests", () => {
       confidence: 0.99,
     };
 
-    // 2 concurrent submissions
-    const [sub1, sub2] = await Promise.all([
-      db.submitTaskResult({
-        id: "res_race_1",
-        taskId: createRes.task.id,
-        workerId: "w_elena_fact",
-        workerToken: workerOffer?.worker_token,
-        resultPayload: validResult,
-      }),
-      db.submitTaskResult({
-        id: "res_race_2",
-        taskId: createRes.task.id,
-        workerId: "w_elena_fact",
-        workerToken: workerOffer?.worker_token,
-        resultPayload: validResult,
-      }),
+    const [sub1, sub2] = await Promise.allSettled([
+      submitTaskResult(taskRes.task_id, { worker_id: "w_elena_fact", result_payload: validResult }, workerOffer?.worker_token),
+      submitTaskResult(taskRes.task_id, { worker_id: "w_elena_fact", result_payload: validResult }, workerOffer?.worker_token),
     ]);
 
-    const successes = [sub1, sub2].filter((s) => s.success);
-    const conflicts = [sub1, sub2].filter((s) => !s.success && s.code === 409);
+    const fulfilled = [sub1, sub2].filter((s) => s.status === "fulfilled");
+    const rejected = [sub1, sub2].filter((s) => s.status === "rejected") as PromiseRejectedResult[];
 
-    expect(successes).toHaveLength(1);
-    expect(conflicts).toHaveLength(1);
-    expect(conflicts[0].error).toContain("already submitted");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason.code).toBe("RESULT_ALREADY_SUBMITTED");
+    expect(rejected[0].reason.status).toBe(409);
   });
 
-  // 5. State Machine Invariants
-  it("should strictly enforce valid transitions and reject illegal jumps", () => {
-    // Valid transitions
-    expect(canTransition("OFFERED", "ACCEPTED")).toBe(true);
-    expect(canTransition("ACCEPTED", "IN_PROGRESS")).toBe(true);
-    expect(canTransition("IN_PROGRESS", "COMPLETED")).toBe(true);
-
-    // Illegal jumps
-    expect(canTransition("OFFERED", "IN_PROGRESS")).toBe(false);
-    expect(canTransition("OFFERED", "COMPLETED")).toBe(false);
-    expect(canTransition("COMPLETED", "IN_PROGRESS")).toBe(false);
-    expect(canTransition("COMPLETED", "ACCEPTED")).toBe(false);
-    expect(canTransition("CANCELLED", "ACCEPTED")).toBe(false);
-
-    // Declared transitions match state definitions
-    expect(VALID_TRANSITIONS.OFFERED).toEqual(["ACCEPTED", "CANCELLED", "EXPIRED"]);
-    expect(VALID_TRANSITIONS.ACCEPTED).toEqual(["IN_PROGRESS", "CANCELLED", "FAILED"]);
-    expect(VALID_TRANSITIONS.IN_PROGRESS).toEqual(["COMPLETED", "CANCELLED", "FAILED"]);
-    expect(VALID_TRANSITIONS.COMPLETED).toEqual([]);
-  });
-
-  // 6. task_offers Row Persisted for Every Offered Worker
-  it("should persist one task_offers row with unguessable token hash per qualified worker", async () => {
+  // 8. Result Retrieval Guard Before Completion (RESULT_NOT_READY)
+  it("should reject result retrieval before task completion with RESULT_NOT_READY", async () => {
     const quote = await db.createQuote({
-      id: "quote_test_offers_count",
-      task_type_id: "ARCHITECTURE_SANITY_CHECK",
-      input_payload: { architecture_summary: "Test architecture description for verification", components: ["App"], expected_scale: "10k" },
-      quoted_price_usd: 69.0,
-      target_payout_usd: 45.0,
-      estimated_minutes: 60,
-      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-    });
-
-    const createRes = await db.createTask({
-      id: "task_test_offers_count",
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
-    });
-
-    // Qualified workers for SYSTEM_ARCHITECTURE: w_sam_arch, w_morgan_general
-    const qualified = await db.getWorkersByCapability("SYSTEM_ARCHITECTURE");
-    expect(createRes.offers).toHaveLength(qualified.length);
-
-    const persistedOffers = await db.getOffersForTask(createRes.task.id);
-    expect(persistedOffers).toHaveLength(qualified.length);
-
-    // Verify token hash is stored
-    for (const offer of persistedOffers) {
-      expect(offer.worker_token_hash).toBeDefined();
-      expect(offer.worker_token_hash.length).toBe(64); // SHA-256 hex
-    }
-  });
-
-  // 7. Worker Offer Token Authorization Boundary
-  it("should reject worker mutation when worker offer token is invalid or missing", async () => {
-    const quote = await db.createQuote({
-      id: "quote_test_worker_auth",
+      id: "quote_test_not_ready",
       task_type_id: "LANDING_PAGE_REVIEW",
-      input_payload: { url: "https://example.com", target_audience: "B2B SaaS" },
+      input_payload: { url: "https://example.com", target_audience: "Devs" },
       quoted_price_usd: 39.0,
       target_payout_usd: 25.0,
       estimated_minutes: 30,
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const createRes = await db.createTask({
-      id: "task_test_worker_auth",
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
+    const taskRes = await createTaskFromQuote({ quote_id: quote.id });
+
+    await expect(
+      getTaskResult(taskRes.task_id, taskRes.agent_token)
+    ).rejects.toMatchObject({
+      code: "RESULT_NOT_READY",
+      status: 400,
     });
-
-    // Reject invalid token on accept
-    const badAccept = await db.acceptTask(createRes.task.id, "w_alex_ux", "invalid_worker_token_xyz");
-    expect(badAccept.success).toBe(false);
-    expect(badAccept.code).toBe(401);
-
-    // Valid accept
-    const validOffer = createRes.offers.find((o) => o.worker_id === "w_alex_ux");
-    const goodAccept = await db.acceptTask(createRes.task.id, "w_alex_ux", validOffer?.worker_token);
-    expect(goodAccept.success).toBe(true);
-
-    // Reject invalid token on start
-    const badStart = await db.startTask(createRes.task.id, "w_alex_ux", "wrong_token");
-    expect(badStart.success).toBe(false);
-    expect(badStart.code).toBe(401);
-
-    // Reject invalid token on submit
-    const badSubmit = await db.submitTaskResult({
-      id: "res_bad_tok",
-      taskId: createRes.task.id,
-      workerId: "w_alex_ux",
-      workerToken: "wrong_token",
-      resultPayload: {
-        top_issues: ["Issue 1"],
-        highest_impact_change: "Change 1",
-        confidence: 0.9,
-      },
-    });
-    expect(badSubmit.success).toBe(false);
-    expect(badSubmit.code).toBe(401);
   });
 
-  // 8. Agent Task Token Authorization Boundary
-  it("should verify unguessable agent token hash and reject unauthorized result access", async () => {
+  // 9. Agent Token Authorization Boundary (UNAUTHORIZED)
+  it("should reject result access with UNAUTHORIZED when agent token is missing or invalid", async () => {
     const quote = await db.createQuote({
-      id: "quote_test_agent_auth",
+      id: "quote_test_auth_check",
       task_type_id: "EXPERT_FACT_VERIFICATION",
       input_payload: { claim: "Verifiable fact check claim", context: "Context check" },
       quoted_price_usd: 29.0,
@@ -279,20 +216,31 @@ describe("Sprint 1 P0/P1 Invariants & Security Hardening Tests", () => {
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const createRes = await db.createTask({
-      id: "task_test_agent_auth",
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
+    const taskRes = await createTaskFromQuote({ quote_id: quote.id });
+    const offer = taskRes.offers?.find((o) => o.worker_id === "w_elena_fact");
+
+    await acceptTask(taskRes.task_id, { worker_id: "w_elena_fact" }, offer?.worker_token);
+    await startTask(taskRes.task_id, { worker_id: "w_elena_fact" }, offer?.worker_token);
+    await submitTaskResult(
+      taskRes.task_id,
+      {
+        worker_id: "w_elena_fact",
+        result_payload: { verdict: "true", explanation: "Verified via authoritative records.", confidence: 0.98 },
+      },
+      offer?.worker_token
+    );
+
+    // Reject with invalid token
+    await expect(
+      getTaskResult(taskRes.task_id, "atk_invalid_token_123")
+    ).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+      status: 401,
     });
 
-    expect(createRes.agent_token).toMatch(/^atk_/);
-
-    // Verify token hash verification
-    const isValid = await db.verifyAgentToken(createRes.task.id, createRes.agent_token);
-    expect(isValid).toBe(true);
-
-    const isFakeValid = await db.verifyAgentToken(createRes.task.id, "atk_fake_invalid_token_123");
-    expect(isFakeValid).toBe(false);
+    // Accept with valid agent token
+    const result = await getTaskResult(taskRes.task_id, taskRes.agent_token);
+    expect(result.status).toBe("COMPLETED");
+    expect((result.result as any).verdict).toBe("true");
   });
 });

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/db";
-import { SubmitTaskResultRequestSchema, validateTaskResult } from "@/lib/schemas";
-import { logEvent } from "@/lib/events";
+import { submitTaskResult } from "@/services/tasks";
+import { apiError, ServiceError } from "@/lib/errors";
 
 export async function POST(
   request: NextRequest,
@@ -9,77 +8,19 @@ export async function POST(
 ) {
   try {
     const resolvedParams = await params;
-    const taskId = resolvedParams.id;
-
     const body = await request.json().catch(() => ({}));
-    const parseResult = SubmitTaskResultRequestSchema.safeParse(body);
-    if (!parseResult.success) {
-      return NextResponse.json(
-        { error: "Invalid request payload", details: parseResult.error.format() },
-        { status: 400 }
-      );
-    }
-
-    const { worker_id, result_payload } = parseResult.data;
 
     const headerToken = request.headers.get("x-worker-token") ||
       request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
     const workerToken = (body as any).token || (body as any).worker_token || headerToken || undefined;
 
-    // Fetch task
-    const task = await db.getTask(taskId);
-    if (!task) {
-      return NextResponse.json({ error: `Task '${taskId}' not found` }, { status: 404 });
+    const result = await submitTaskResult(resolvedParams.id, body, workerToken);
+    return NextResponse.json(result, { status: 200 });
+  } catch (err: unknown) {
+    if (err instanceof ServiceError) {
+      return apiError(err.message, err.code, err.status, err.details);
     }
-
-    // Validate result against task type result schema
-    const resultValidation = validateTaskResult(task.task_type_id, result_payload);
-    if (!resultValidation.success) {
-      return NextResponse.json(
-        {
-          error: `Malformed result payload for task type '${task.task_type_id}'`,
-          details: resultValidation.error.format(),
-        },
-        { status: 400 }
-      );
-    }
-
-    const resultId = `res_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-
-    const submitRes = await db.submitTaskResult({
-      id: resultId,
-      taskId,
-      workerId: worker_id,
-      workerToken,
-      resultPayload: resultValidation.data as Record<string, unknown>,
-    });
-
-    if (!submitRes.success || !submitRes.task || !submitRes.result) {
-      return NextResponse.json(
-        { error: submitRes.error || "Failed to submit task result" },
-        { status: submitRes.code || 400 }
-      );
-    }
-
-    // Log lifecycle events
-    await logEvent("task_submitted", "task", taskId, {
-      worker_id,
-      result_id: resultId,
-    });
-
-    await logEvent("task_completed", "task", taskId, {
-      worker_id,
-      result_id: resultId,
-      status: "COMPLETED",
-    });
-
-    return NextResponse.json({
-      task_id: submitRes.task.id,
-      status: submitRes.task.status,
-      result: submitRes.result.result_payload,
-      submitted_at: submitRes.result.submitted_at,
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: "Internal server error", details: err.message }, { status: 500 });
+    const message = err instanceof Error ? err.message : "Internal server error";
+    return apiError(message, "INTERNAL_ERROR", 500);
   }
 }

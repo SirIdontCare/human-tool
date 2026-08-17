@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { db } from "@/db";
-import { StartTaskRequestSchema } from "@/lib/schemas";
-import { logEvent } from "@/lib/events";
+import { startTask } from "@/services/tasks";
+import { apiError, ServiceError } from "@/lib/errors";
 
 export async function POST(
   request: NextRequest,
@@ -9,44 +8,19 @@ export async function POST(
 ) {
   try {
     const resolvedParams = await params;
-    const taskId = resolvedParams.id;
-
     const body = await request.json().catch(() => ({}));
-    const parseResult = StartTaskRequestSchema.safeParse(body);
-    if (!parseResult.success) {
-      return NextResponse.json(
-        { error: "Invalid request payload", details: parseResult.error.format() },
-        { status: 400 }
-      );
-    }
-
-    const { worker_id } = parseResult.data;
 
     const headerToken = request.headers.get("x-worker-token") ||
       request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
     const workerToken = (body as any).token || (body as any).worker_token || headerToken || undefined;
 
-    const startRes = await db.startTask(taskId, worker_id, workerToken);
-    if (!startRes.success || !startRes.task) {
-      return NextResponse.json(
-        { error: startRes.error || "Failed to start task" },
-        { status: startRes.code || 400 }
-      );
+    const result = await startTask(resolvedParams.id, body, workerToken);
+    return NextResponse.json(result, { status: 200 });
+  } catch (err: unknown) {
+    if (err instanceof ServiceError) {
+      return apiError(err.message, err.code, err.status, err.details);
     }
-
-    // Log task_started event
-    await logEvent("task_started", "task", taskId, {
-      worker_id,
-      status: startRes.task.status,
-    });
-
-    return NextResponse.json({
-      task_id: startRes.task.id,
-      status: startRes.task.status,
-      assigned_worker_id: startRes.task.assigned_worker_id,
-      updated_at: startRes.task.updated_at,
-    });
-  } catch (err: any) {
-    return NextResponse.json({ error: "Internal server error", details: err.message }, { status: 500 });
+    const message = err instanceof Error ? err.message : "Internal server error";
+    return apiError(message, "INTERNAL_ERROR", 500);
   }
 }

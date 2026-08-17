@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useState, Suspense } from "react";
+import React, { useEffect, useState, useCallback, Suspense } from "react";
 import { useParams, useSearchParams } from "next/navigation";
+import Link from "next/link";
 import {
   CheckCircle2,
   Clock,
@@ -73,7 +74,7 @@ function WorkerTaskContent() {
   const [sourceNotes, setSourceNotes] = useState("");
   const [factConfidence, setFactConfidence] = useState(0.95);
 
-  const fetchTask = async () => {
+  const fetchTask = useCallback(async () => {
     try {
       setLoading(true);
       const res = await fetch(`/api/tasks/${taskId}`);
@@ -99,13 +100,13 @@ function WorkerTaskContent() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [taskId]);
 
   useEffect(() => {
     if (taskId) {
       fetchTask();
     }
-  }, [taskId]);
+  }, [taskId, fetchTask]);
 
   const workerToken = searchParams?.get("token") || searchParams?.get("worker_token") || "";
 
@@ -228,9 +229,9 @@ function WorkerTaskContent() {
         <AlertTriangle className="w-12 h-12 text-red-400 mx-auto mb-4" />
         <h2 className="text-xl font-bold text-red-200">Task Not Found</h2>
         <p className="text-slate-400 mt-2">{error || `No task exists with ID: ${taskId}`}</p>
-        <a href="/" className="mt-6 inline-block px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg">
+        <Link href="/" className="mt-6 inline-block px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg">
           Return to Agent Sandbox
-        </a>
+        </Link>
       </div>
     );
   }
