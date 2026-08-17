@@ -59,6 +59,7 @@ export interface QuoteRow {
   estimated_minutes: number;
   expires_at: string;
   created_at: string;
+  agent_token_hash: string;
 }
 
 export interface TaskRow {
@@ -81,6 +82,7 @@ export interface TaskOfferRow {
   status: string;
   offered_at: string;
   responded_at: string | null;
+  worker_token_issued_at: string | null;
 }
 
 export interface TaskResultRow {
@@ -321,6 +323,28 @@ export const db = {
       .filter((w): w is WorkerRow => Boolean(w && w.status === "ACTIVE"));
   },
 
+  // Ops/test seam: provision or revoke a worker capability directly (used to
+  // repair drift or simulate post-offer capability revocation). Revoking the
+  // required capability after an offer was issued keeps acceptance gated by
+  // WORKER_CAPABILITY_REQUIRED (403) even for holders of a valid offer token.
+  async setWorkerCapabilityStatus(workerId: string, capabilityCode: string, status: "VERIFIED" | "REVOKED"): Promise<boolean> {
+    checkProductionDbSafety();
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(
+        `UPDATE worker_capabilities SET status = $1 WHERE worker_id = $2 AND capability_code = $3 RETURNING id`,
+        [status, workerId, capabilityCode]
+      );
+      return res.rows.length > 0;
+    }
+    const cap = Array.from(memStore.workerCapabilities.values()).find(
+      (c) => c.worker_id === workerId && c.capability_code === capabilityCode
+    );
+    if (!cap) return false;
+    cap.status = status;
+    return true;
+  },
+
   // Quotes
   async createQuote(params: {
     id: string;
@@ -330,10 +354,17 @@ export const db = {
     target_payout_usd: number;
     estimated_minutes: number;
     expires_at: string;
-  }): Promise<QuoteRow> {
+  }): Promise<{ quote: QuoteRow; agent_token: string }> {
     checkProductionDbSafety();
     const pool = getPgPool();
     const createdAt = new Date().toISOString();
+
+    // The agent capability is QUOTE-SCOPED: a high-entropy opaque token is
+    // minted here, stored ONLY as a SHA-256 hash, and returned raw exactly
+    // once to the requesting agent. quote_id alone is never a credential.
+    const agentToken = generateToken("atk");
+    const agentTokenHash = hashToken(agentToken);
+
     const row: QuoteRow = {
       id: params.id,
       task_type_id: params.task_type_id,
@@ -343,12 +374,13 @@ export const db = {
       estimated_minutes: params.estimated_minutes,
       expires_at: params.expires_at,
       created_at: createdAt,
+      agent_token_hash: agentTokenHash,
     };
 
     if (pool) {
       await pool.query(
-        `INSERT INTO quotes (id, task_type_id, input_payload, quoted_price_usd, target_payout_usd, estimated_minutes, expires_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        `INSERT INTO quotes (id, task_type_id, input_payload, quoted_price_usd, target_payout_usd, estimated_minutes, expires_at, created_at, agent_token_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
         [
           row.id,
           row.task_type_id,
@@ -358,12 +390,23 @@ export const db = {
           row.estimated_minutes,
           row.expires_at,
           row.created_at,
+          row.agent_token_hash,
         ]
       );
     } else {
       memStore.quotes.set(row.id, row);
     }
-    return row;
+    return { quote: row, agent_token: agentToken };
+  },
+
+  // Verify an agent token against the quote-scoped capability hash. Fails
+  // closed: missing token, missing hash, or mismatched hash never authorizes.
+  async verifyQuoteAgentToken(quoteId: string, agentToken: string): Promise<boolean> {
+    checkProductionDbSafety();
+    if (!agentToken) return false;
+    const quote = await this.getQuote(quoteId);
+    if (!quote || !quote.agent_token_hash) return false;
+    return verifyTokenHash(agentToken, quote.agent_token_hash);
   },
 
   async getQuote(id: string): Promise<QuoteRow | null> {
@@ -400,26 +443,22 @@ export const db = {
     quote_id: string;
     task_type_id: string;
     input_payload: Record<string, unknown>;
-  }): Promise<{ task: TaskRow; agent_token: string; offers: Array<{ worker_id: string; worker_token: string; offer_id: string }>; is_existing: boolean }> {
+    agent_token_hash: string;
+  }): Promise<{ task: TaskRow; offers: Array<{ worker_id: string; worker_token: string; offer_id: string }>; is_existing: boolean }> {
     checkProductionDbSafety();
     const pool = getPgPool();
     const now = new Date().toISOString();
 
-    // Check for existing task for idempotent return (a replay must not strand the agent:
-    // atomically rotate the agent token so the caller can authenticate to the existing task)
+    // Replay: same quote_id + same valid agent token -> same task, NO rotation.
+    // quote_id alone can never mint or revoke a credential.
     const existing = await this.getTaskByQuoteId(params.quote_id);
     if (existing) {
-      const rotatedAgentToken = await this.rotateAgentToken(existing.id);
       return {
         task: existing,
-        agent_token: rotatedAgentToken || "",
         offers: [],
         is_existing: true,
       };
     }
-
-    const agentToken = generateToken("atk");
-    const agentTokenHash = hashToken(agentToken);
 
     const taskRow: TaskRow = {
       id: params.id,
@@ -428,7 +467,7 @@ export const db = {
       status: "OFFERED",
       input_payload: params.input_payload,
       assigned_worker_id: null,
-      agent_token_hash: agentTokenHash,
+      agent_token_hash: params.agent_token_hash,
       created_at: now,
       updated_at: now,
     };
@@ -463,27 +502,12 @@ export const db = {
         );
 
         if (taskInsert.rows.length === 0) {
-          // Idempotent replay: rotate the agent token inside the SAME transaction so
-          // the replaying agent receives a usable credential for the existing task.
-          const rotatedAgentToken = generateToken("atk");
-          const rotatedRes = await client.query(
-            `UPDATE tasks SET agent_token_hash = $1, updated_at = $2 WHERE quote_id = $3 RETURNING *`,
-            [hashToken(rotatedAgentToken), now, params.quote_id]
-          );
-          if (rotatedRes.rows.length === 0) {
-            await client.query("ROLLBACK");
-            const conflictTask = await this.getTaskByQuoteId(params.quote_id);
-            return {
-              task: conflictTask!,
-              agent_token: "",
-              offers: [],
-              is_existing: true,
-            };
-          }
+          // Concurrent replay with the SAME valid token: return the existing
+          // task untouched. No rotation, no revocation, token stays valid.
           await client.query("COMMIT");
+          const conflictTask = await this.getTaskByQuoteId(params.quote_id);
           return {
-            task: rotatedRes.rows[0],
-            agent_token: rotatedAgentToken,
+            task: conflictTask!,
             offers: [],
             is_existing: true,
           };
@@ -505,7 +529,7 @@ export const db = {
         }
 
         await client.query("COMMIT");
-        return { task: taskInsert.rows[0], agent_token: agentToken, offers, is_existing: false };
+        return { task: taskInsert.rows[0], offers, is_existing: false };
       } catch (err) {
         await client.query("ROLLBACK");
         throw err;
@@ -513,10 +537,9 @@ export const db = {
         client.release();
       }
     } else {
-      if (memStore.tasks.has(taskRow.id) || Array.from(memStore.tasks.values()).some((t) => t.quote_id === taskRow.quote_id)) {
-        const conflictTask = Array.from(memStore.tasks.values()).find((t) => t.quote_id === taskRow.quote_id);
-        const rotatedAgentToken = conflictTask ? await this.rotateAgentToken(conflictTask.id) : null;
-        return { task: conflictTask!, agent_token: rotatedAgentToken || "", offers: [], is_existing: true };
+      const conflictTask = Array.from(memStore.tasks.values()).find((t) => t.quote_id === taskRow.quote_id);
+      if (conflictTask) {
+        return { task: conflictTask, offers: [], is_existing: true };
       }
 
       memStore.tasks.set(taskRow.id, taskRow);
@@ -534,12 +557,13 @@ export const db = {
           status: "OFFERED",
           offered_at: now,
           responded_at: null,
+          worker_token_issued_at: null,
         };
         memStore.taskOffers.set(`${taskRow.id}_${worker.id}`, offerRow);
         offers.push({ worker_id: worker.id, worker_token: workerToken, offer_id: offerId });
       }
 
-      return { task: taskRow, agent_token: agentToken, offers, is_existing: false };
+      return { task: taskRow, offers, is_existing: false };
     }
   },
 
@@ -620,26 +644,34 @@ export const db = {
     return verifyTokenHash(workerToken, offer.worker_token_hash);
   },
 
-  // Resolve a worker's identity from an opaque per-offer worker token alone.
-  async getWorkerIdByOfferToken(taskId: string, workerToken: string): Promise<string | null> {
+  // Resolve an offer row from the opaque per-offer worker token alone.
+  // Identity is ALWAYS derived from the token; worker_id never authenticates.
+  async getOfferByWorkerToken(taskId: string, workerToken: string): Promise<TaskOfferRow | null> {
     checkProductionDbSafety();
     if (!workerToken) return null;
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(
-        `SELECT worker_id, worker_token_hash FROM task_offers WHERE task_id = $1`,
+        `SELECT * FROM task_offers WHERE task_id = $1`,
         [taskId]
       );
       for (const row of res.rows) {
-        if (verifyTokenHash(workerToken, row.worker_token_hash)) return row.worker_id;
+        if (verifyTokenHash(workerToken, row.worker_token_hash)) return row;
       }
       return null;
     }
     const offers = Array.from(memStore.taskOffers.values()).filter((o) => o.task_id === taskId);
     for (const offer of offers) {
-      if (verifyTokenHash(workerToken, offer.worker_token_hash)) return offer.worker_id;
+      if (verifyTokenHash(workerToken, offer.worker_token_hash)) return offer;
     }
     return null;
+  },
+
+  // Resolve a worker's identity from an opaque per-offer worker token alone.
+  async getWorkerIdByOfferToken(taskId: string, workerToken: string): Promise<string | null> {
+    checkProductionDbSafety();
+    const offer = await this.getOfferByWorkerToken(taskId, workerToken);
+    return offer ? offer.worker_id : null;
   },
 
   // Rotate a worker offer token: generates a fresh opaque credential, stores
@@ -663,6 +695,113 @@ export const db = {
     return token;
   },
 
+  // Worker token issuance (internal worker-delivery channel).
+  //
+  // FIRST issuance: generates an opaque token (hash stored only), records
+  // worker_token_issued_at, returns the raw token exactly once. Repeat calls
+  // without explicit rotate=1 fail with 409 and must NOT invalidate the
+  // delivered token. rotate=1 is the explicit operator recovery path, but it
+  // refuses to rotate ACCEPTED / IN_PROGRESS tasks so an active worker is
+  // never stranded. Concurrent issuance serializes on a row lock and yields
+  // exactly one success.
+  async issueWorkerOfferToken(
+    taskId: string,
+    workerId: string,
+    opts: { rotate?: boolean } = {}
+  ): Promise<{ success: boolean; token?: string; error?: string; code?: number }> {
+    checkProductionDbSafety();
+    const pool = getPgPool();
+    const now = new Date().toISOString();
+
+    if (pool) {
+      const client: PoolClient = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Row lock the offer (joined task status) so concurrent issuance serializes.
+        const offerRes = await client.query(
+          `SELECT o.id, o.worker_token_hash, o.worker_token_issued_at, o.status AS offer_status, t.status AS task_status
+           FROM task_offers o JOIN tasks t ON t.id = o.task_id
+           WHERE o.task_id = $1 AND o.worker_id = $2
+           FOR UPDATE OF o`,
+          [taskId, workerId]
+        );
+        if (offerRes.rows.length === 0) {
+          await client.query("ROLLBACK");
+          return { success: false, error: "Worker offer not found for this task", code: 404 };
+        }
+        const offer = offerRes.rows[0];
+
+        // Never rotate (or silently re-issue) an already engaged task.
+        if (offer.task_status === "ACCEPTED" || offer.task_status === "IN_PROGRESS") {
+          await client.query("ROLLBACK");
+          return {
+            success: false,
+            error: `Cannot issue worker token for task in status '${offer.task_status}' (worker already engaged)`,
+            code: 409,
+          };
+        }
+
+        // Repeat without rotation must not invalidate the delivered credential.
+        if (!opts.rotate && offer.worker_token_issued_at) {
+          await client.query("ROLLBACK");
+          return {
+            success: false,
+            error: "Worker offer token already issued; pass rotate=1 to rotate explicitly",
+            code: 409,
+          };
+        }
+
+        const token = generateToken("otk");
+        const res = await client.query(
+          `UPDATE task_offers
+           SET worker_token_hash = $1, worker_token_issued_at = $2
+           WHERE task_id = $3 AND worker_id = $4
+           RETURNING id`,
+          [hashToken(token), now, taskId, workerId]
+        );
+        if (res.rows.length === 0) {
+          await client.query("ROLLBACK");
+          return { success: false, error: "Worker offer not found for this task", code: 404 };
+        }
+
+        await client.query("COMMIT");
+        return { success: true, token };
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    const offer = memStore.taskOffers.get(`${taskId}_${workerId}`) ||
+                  Array.from(memStore.taskOffers.values()).find((o) => o.task_id === taskId && o.worker_id === workerId);
+    if (!offer) return { success: false, error: "Worker offer not found for this task", code: 404 };
+
+    const memTask = memStore.tasks.get(taskId);
+    const taskStatus = memTask?.status ?? "";
+    if (taskStatus === "ACCEPTED" || taskStatus === "IN_PROGRESS") {
+      return {
+        success: false,
+        error: `Cannot issue worker token for task in status '${taskStatus}' (worker already engaged)`,
+        code: 409,
+      };
+    }
+    if (!opts.rotate && offer.worker_token_issued_at) {
+      return {
+        success: false,
+        error: "Worker offer token already issued; pass rotate=1 to rotate explicitly",
+        code: 409,
+      };
+    }
+
+    const token = generateToken("otk");
+    offer.worker_token_hash = hashToken(token);
+    offer.worker_token_issued_at = now;
+    return { success: true, token };
+  },
+
   async getOffersForTask(taskId: string): Promise<TaskOfferRow[]> {
     checkProductionDbSafety();
     const pool = getPgPool();
@@ -673,26 +812,44 @@ export const db = {
     return Array.from(memStore.taskOffers.values()).filter((o) => o.task_id === taskId);
   },
 
-  // Task Acceptance (Atomic Single Transaction: verify token -> capability -> claim -> mark offer -> event)
+  // Task Acceptance (Atomic Single Transaction: AUTHENTICATE -> identity ->
+  // consistency assertion -> capability -> claim -> mark offer -> event)
   async acceptTask(
     taskId: string,
-    workerId: string,
     workerToken?: string,
+    claimedWorkerId?: string,
     event?: { eventType: string; entityType: string; entityId: string; payload?: Record<string, unknown> }
-  ): Promise<{ success: boolean; task?: TaskRow; error?: string; code?: number }> {
+  ): Promise<{ success: boolean; task?: TaskRow; worker_id?: string; error?: string; code?: number }> {
     checkProductionDbSafety();
     const pool = getPgPool();
     const now = new Date().toISOString();
 
-    // Task existence check first
+    // AUTHENTICATION FIRST: an unauthenticated caller must never be able to
+    // distinguish worker existence, capability, or offer state through
+    // differing responses.
+    if (!workerToken) {
+      return { success: false, error: "Worker offer token is required", code: 401 };
+    }
+
+    // Identity comes ONLY from the opaque per-offer token (never worker_id).
+    const offer = await this.getOfferByWorkerToken(taskId, workerToken);
+    if (!offer) {
+      return { success: false, error: "Invalid worker offer token for this task", code: 401 };
+    }
+    const workerId = offer.worker_id;
+
+    // Optional consistency assertion: a caller-supplied worker_id must match
+    // the token-derived identity. It never authenticates or selects identity.
+    if (claimedWorkerId && claimedWorkerId !== workerId) {
+      return { success: false, error: "Worker identity mismatch with offer token", code: 401 };
+    }
+
     const task = await this.getTask(taskId);
     if (!task) {
       return { success: false, error: `Task '${taskId}' not found`, code: 404 };
     }
 
-    // Capability gate: an incapable worker must receive WORKER_CAPABILITY_REQUIRED (403).
-    // This is reachable even without a credential because offers only exist for
-    // capability-qualified workers; the token below remains mandatory to claim.
+    // AUTHORIZATION (only after authentication): capability gate.
     const taskType = await this.getTaskType(task.task_type_id);
     const hasCapability = await this.verifyWorkerCapability(workerId, taskType?.required_capability || "");
     if (!hasCapability) {
@@ -703,17 +860,24 @@ export const db = {
       };
     }
 
-    // Identity MUST come from the opaque per-offer worker token (no worker_id fallback)
-    if (!workerToken) {
-      return { success: false, error: "Worker offer token is required", code: 401 };
+    const worker = await this.getWorker(workerId);
+    let eventRow: EventRow | null = null;
+    if (event) {
+      eventRow = makeEventRow(
+        {
+          eventType: event.eventType,
+          entityType: event.entityType,
+          entityId: event.entityId,
+          payload: {
+            ...(event.payload || {}),
+            worker_id: workerId,
+            worker_name: worker?.display_name || workerId,
+            status: "ACCEPTED",
+          },
+        },
+        now
+      );
     }
-
-    const validToken = await this.verifyWorkerToken(taskId, workerId, workerToken);
-    if (!validToken) {
-      return { success: false, error: "Invalid worker offer token for this worker", code: 401 };
-    }
-
-    const eventRow = event ? makeEventRow(event, now) : null;
 
     if (pool) {
       const client: PoolClient = await pool.connect();
@@ -762,7 +926,7 @@ export const db = {
         }
 
         await client.query("COMMIT");
-        return { success: true, task: res.rows[0] };
+        return { success: true, task: res.rows[0], worker_id: workerId };
       } catch (err) {
         await client.query("ROLLBACK");
         throw err;
@@ -798,7 +962,7 @@ export const db = {
         memStore.events.push(eventRow);
       }
 
-      return { success: true, task: { ...memTask } };
+      return { success: true, task: { ...memTask }, worker_id: workerId };
     }
   },
 

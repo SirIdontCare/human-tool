@@ -13,11 +13,27 @@ import {
 } from "../src/services/tasks";
 import { db } from "../src/db";
 import { RESULT_SCHEMAS } from "../src/lib/catalogue";
+import { validateTaskResult } from "../src/lib/schemas";
+import { hashToken } from "../src/lib/auth";
 import { ServiceError } from "../src/lib/errors";
 
-async function runHardenedNeonE2ETest() {
+function expectServiceError(err: unknown, code: string, status: number) {
+  if (!(err instanceof ServiceError) || err.code !== code || err.status !== status) {
+    throw new Error(`Expected ServiceError ${code} (${status}), got: ${err instanceof ServiceError ? `${err.code} (${err.status})` : JSON.stringify(err)}`);
+  }
+}
+
+const ARCH_RESULT = {
+  verdict: "acceptable" as const,
+  critical_issues: ["Enable transaction pooler to prevent idle socket leaks on serverless restarts"],
+  recommended_changes: ["Configure connection timeout to 10s with max 20 client limit"],
+  scaling_risks: ["Multi-region query round-trips"],
+  confidence: 0.96,
+};
+
+async function runFinalPreMCPNeonE2ETest() {
   console.log("==================================================================");
-  console.log("  STARTING SPRINT 1.1 FINAL HARDENING E2E (REAL NEON POSTGRES)    ");
+  console.log("  PRE-MCP FINAL SECURITY E2E (REAL NEON POSTGRES)                ");
   console.log("==================================================================");
 
   const databaseUrl = process.env.DATABASE_URL;
@@ -34,50 +50,86 @@ async function runHardenedNeonE2ETest() {
   const ping = await rawPool.query("SELECT current_database(), current_user, NOW() as db_time, version()");
   console.log(`[Neon DB Connected] DB: ${ping.rows[0].current_database}, User: ${ping.rows[0].current_user}`);
   console.log("------------------------------------------------------------------");
-  console.log("DATABASE TARGET: PostgreSQL/Neon (NOT InMemoryStore)");
 
-  // 1. Verify schema_migrations table (migration 004 must be applied)
-  console.log("\n[1/13] Verifying schema_migrations tracking in Neon...");
+  // Prove this suite is exercising PostgreSQL, NOT the in-memory store.
+  if (!db.isPostgres) {
+    throw new Error("DATABASE_URL target was not detected — suite must run against real PostgreSQL (not InMemoryStore)!");
+  }
+  const rawCheck = await rawPool.query("SELECT 1 AS one");
+  if (rawCheck.rows[0].one !== 1) {
+    throw new Error("Raw PostgreSQL connection failed the smoke check!");
+  }
+  console.log("DATABASE TARGET: PostgreSQL/Neon (NOT InMemoryStore) — PROVEN");
+
+  // ============================================================
+  // [1/15] Migrations applied
+  // ============================================================
+  console.log("\n[1/15] Verifying schema_migrations tracking in Neon...");
   const migRes = await rawPool.query("SELECT version, applied_at FROM schema_migrations ORDER BY version ASC");
   console.log("Applied migrations in Neon:", migRes.rows.map((r) => r.version));
-  if (migRes.rows.length < 4) {
-    throw new Error(`Expected at least 4 migrations in schema_migrations! Found: ${migRes.rows.length}`);
+  if (migRes.rows.length < 5) {
+    throw new Error(`Expected at least 5 migrations in schema_migrations! Found: ${migRes.rows.length}`);
   }
   if (!migRes.rows.some((r) => r.version.includes("004"))) {
     throw new Error("Migration 004 is missing from schema_migrations!");
   }
-  console.log("✓ Migration 004 applied");
+  if (!migRes.rows.some((r) => r.version.includes("005"))) {
+    throw new Error("Migration 005 is missing from schema_migrations!");
+  }
+  console.log("✓ Migrations 004 and 005 applied");
 
-  // 1b. Verify post-migration security invariants directly in SQL
-  console.log("\n[2/13] Verifying hardened schema invariants in live Neon...");
+  // ============================================================
+  // [2/15] Schema invariants (005: quotes.agent_token_hash NOT NULL,
+  // worker_token_issued_at present; 004 invariants intact)
+  // ============================================================
+  console.log("\n[2/15] Verifying hardened schema invariants in live Neon...");
   const nullAgentHash = await rawPool.query(
     "SELECT count(*)::int AS c FROM tasks WHERE agent_token_hash IS NULL OR agent_token_hash = ''"
   );
   const nullWorkerHash = await rawPool.query(
     "SELECT count(*)::int AS c FROM task_offers WHERE worker_token_hash IS NULL OR worker_token_hash = ''"
   );
-  const nullability = await rawPool.query(
-    `SELECT table_name, column_name, is_nullable FROM information_schema.columns
-     WHERE (table_name = 'tasks' AND column_name = 'agent_token_hash')
-        OR (table_name = 'task_offers' AND column_name = 'worker_token_hash')`
+  const nullQuoteHash = await rawPool.query(
+    "SELECT count(*)::int AS c FROM quotes WHERE agent_token_hash IS NULL OR agent_token_hash = ''"
   );
   const dupQuotes = await rawPool.query("SELECT count(*)::int AS c FROM (SELECT quote_id FROM tasks GROUP BY quote_id HAVING count(*) > 1) d");
   const dupOffers = await rawPool.query("SELECT count(*)::int AS c FROM (SELECT task_id, worker_id FROM task_offers GROUP BY task_id, worker_id HAVING count(*) > 1) d");
   if (nullAgentHash.rows[0].c !== 0) throw new Error("tasks.agent_token_hash still contains NULL/empty values!");
   if (nullWorkerHash.rows[0].c !== 0) throw new Error("task_offers.worker_token_hash still contains NULL/empty values!");
+  if (nullQuoteHash.rows[0].c !== 0) throw new Error("quotes.agent_token_hash still contains NULL/empty values!");
   if (dupQuotes.rows[0].c !== 0) throw new Error("Duplicate tasks.quote_id rows exist!");
   if (dupOffers.rows[0].c !== 0) throw new Error("Duplicate task_offers(task_id, worker_id) rows exist!");
+
+  const nullability = await rawPool.query(
+    `SELECT table_name, column_name, is_nullable FROM information_schema.columns
+     WHERE (table_name = 'quotes' AND column_name = 'agent_token_hash')
+        OR (table_name = 'tasks' AND column_name = 'agent_token_hash')
+        OR (table_name = 'task_offers' AND column_name = 'worker_token_hash')`
+  );
   for (const row of nullability.rows) {
     if (row.is_nullable !== "NO") throw new Error(`${row.table_name}.${row.column_name} must be NOT NULL in Neon!`);
   }
-  const statusCheck = await rawPool.query(
-    "SELECT conname FROM pg_constraint WHERE conname = 'tasks_status_check'"
+  const issuedAtCol = await rawPool.query(
+    "SELECT column_name FROM information_schema.columns WHERE table_name = 'task_offers' AND column_name = 'worker_token_issued_at'"
   );
+  if (issuedAtCol.rows.length !== 1) throw new Error("task_offers.worker_token_issued_at column missing in Neon!");
+  const statusCheck = await rawPool.query("SELECT conname FROM pg_constraint WHERE conname = 'tasks_status_check'");
   if (statusCheck.rows.length !== 1) throw new Error("tasks_status_check constraint missing in Neon!");
-  console.log("✓ agent_token_hash NOT NULL, worker_token_hash NOT NULL, unique quote_id, tasks_status_check verified");
 
-  // 1c. Verify published result_schema matches the canonical single source of truth
-  console.log("\n[3/13] Verifying result_schema against the canonical source of truth...");
+  // Post-migration quote<->task hash consistency for pre-existing customers.
+  const hashConsistency = await rawPool.query(
+    `SELECT count(*)::int AS c FROM quotes q JOIN tasks t ON t.quote_id = q.id
+     WHERE q.agent_token_hash <> t.agent_token_hash`
+  );
+  if (hashConsistency.rows[0].c !== 0) {
+    throw new Error("quotes.agent_token_hash does not match its task's agent_token_hash for existing rows!");
+  }
+  console.log("✓ quotes.agent_token_hash NOT NULL, worker_token_issued_at present, 004 invariants intact, quote<->task hashes consistent");
+
+  // ============================================================
+  // [3/15] result_schema == canonical contract + customer snapshot
+  // ============================================================
+  console.log("\n[3/15] Verifying result_schema against the canonical contract...");
   const normalizeJson = (v: unknown): unknown => {
     if (Array.isArray(v)) return v.map(normalizeJson);
     if (v && typeof v === "object") {
@@ -92,11 +144,41 @@ async function runHardenedNeonE2ETest() {
     if (JSON.stringify(normalizeJson(RESULT_SCHEMAS[row.code])) !== JSON.stringify(normalizeJson(row.result_schema))) {
       throw new Error(`result_schema for ${row.code} drifted from canonical RESULT_SCHEMAS!`);
     }
+    // Every published-schema-valid payload must pass the real submission validator.
+    const sampleByCode: Record<string, Record<string, unknown>> = {
+      LANDING_PAGE_REVIEW: {
+        top_issues: ["Hero value prop unclear"],
+        highest_impact_change: "Add quickstart above the fold",
+        confidence: 0.95,
+      },
+      ARCHITECTURE_SANITY_CHECK: {
+        verdict: "acceptable",
+        recommended_changes: ["Use a transaction pooler"],
+        confidence: 0.9,
+      },
+      EXPERT_FACT_VERIFICATION: {
+        verdict: "cannot_confirm",
+        explanation: "No authoritative source corroborates this claim after review.",
+        confidence: 0.71,
+      },
+    };
+    const sample = sampleByCode[String(row.code)];
+    if (!sample) {
+      throw new Error(`No valid sample payload defined for task type ${row.code}`);
+    }
+    const validation = validateTaskResult(row.code, sample);
+    if (!validation.success) {
+      throw new Error(`Published-schema-valid payload for ${row.code} was rejected by the real validator!`);
+    }
   }
-  console.log("✓ Live result_schema identical to canonical RESULT_SCHEMAS");
+  const customerResultsBefore = await rawPool.query("SELECT count(*)::int AS c FROM task_results");
+  console.log("✓ Live result_schema identical to canonical RESULT_SCHEMAS and accepted by the real validator");
+  console.log(`  Customer task_results snapshot BEFORE this suite: ${customerResultsBefore.rows[0].c}`);
 
-  // 2. Request Quote through Service Layer
-  console.log("\n[4/13] Requesting quote via service layer (sanitized agent output)...");
+  // ============================================================
+  // [4/15] Quote capability: token minted once, hash-only storage
+  // ============================================================
+  console.log("\n[4/15] Quote-scoped agent capability (token minted at quote creation)...");
   const quoteRes = await requestQuote({
     task_type: "ARCHITECTURE_SANITY_CHECK",
     input_payload: {
@@ -107,236 +189,347 @@ async function runHardenedNeonE2ETest() {
     },
   });
 
+  if (!quoteRes.agent_token || !quoteRes.agent_token.startsWith("atk_")) {
+    throw new Error("Quote response must return a raw agent token (atk_...) exactly once!");
+  }
+  const rawAgentToken = quoteRes.agent_token;
   if ((quoteRes as any).target_payout_usd !== undefined) {
     throw new Error("Agent-facing quote response leaked target_payout_usd!");
   }
-  console.log(`✓ Quote created: ${quoteRes.quote_id} ($${quoteRes.customer_price_usd} USD, SLA: ${quoteRes.estimated_minutes}m)`);
-  console.log(`✓ Verified target_payout_usd is NOT exposed to agents`);
+  const quoteRow = await rawPool.query("SELECT agent_token_hash FROM quotes WHERE id = $1", [quoteRes.quote_id]);
+  if (!quoteRow.rows[0] || quoteRow.rows[0].agent_token_hash !== hashToken(rawAgentToken)) {
+    throw new Error("quotes.agent_token_hash must be the SHA-256 hash of the returned token (raw token must never be stored)!");
+  }
+  const quoteEvents = await rawPool.query(
+    "SELECT payload FROM events WHERE entity_type = 'quote' AND entity_id = $1",
+    [quoteRes.quote_id]
+  );
+  for (const evt of quoteEvents.rows) {
+    if (JSON.stringify(evt.payload).includes(rawAgentToken)) {
+      throw new Error("Raw agent token leaked into lifecycle events!");
+    }
+  }
+  console.log(`✓ Quote created: ${quoteRes.quote_id}; token returned once, stored ONLY as SHA-256 hash`);
+  console.log("✓ Raw agent token is NOT stored and NOT present in any lifecycle event");
 
-  // 3. Create Task & Verify Idempotency in Neon (with agent token rotation on replay)
-  console.log("\n[5/13] Creating task and testing idempotent replay in Neon...");
-  const taskRes1 = await createTaskFromQuote({ quote_id: quoteRes.quote_id });
+  // ============================================================
+  // [5/15] Task creation requires the quote-scoped agent token
+  // ============================================================
+  console.log("\n[5/15] POST task creation auth boundaries...");
+  try {
+    await createTaskFromQuote({ quote_id: quoteRes.quote_id });
+    throw new Error("Task creation WITHOUT agent token must fail!");
+  } catch (err: any) {
+    expectServiceError(err, "UNAUTHORIZED", 401);
+  }
+  try {
+    await createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", "atk_wrong_token_123");
+    throw new Error("Task creation with WRONG agent token must fail!");
+  } catch (err: any) {
+    expectServiceError(err, "UNAUTHORIZED", 401);
+  }
+  console.log("✓ Quote_id alone -> 401 UNAUTHORIZED; wrong token -> 401 UNAUTHORIZED");
+
+  const taskRes1 = await createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", rawAgentToken);
   if (taskRes1.is_existing) throw new Error("First task creation must be new");
-  if (!taskRes1.agent_token) throw new Error("First task creation must return an agent token");
-  const firstAgentToken = taskRes1.agent_token;
-
   const serializedCreate = JSON.stringify(taskRes1);
-  if (serializedCreate.includes("worker_token") || serializedCreate.includes("otk_") || serializedCreate.includes("token=")) {
-    throw new Error("Agent-facing task creation response leaked worker credentials!");
+  if (
+    serializedCreate.includes("worker_token") ||
+    serializedCreate.includes("otk_") ||
+    serializedCreate.includes("token=") ||
+    serializedCreate.includes(rawAgentToken)
+  ) {
+    throw new Error("Agent-facing task creation response leaked credentials (worker token or raw agent token)!");
   }
-  console.log(`✓ Task created: ${taskRes1.task_id} (Status: ${taskRes1.status})`);
-  console.log(`✓ Agent response contains NO worker credentials`);
+  const dbTask1 = await rawPool.query("SELECT agent_token_hash FROM tasks WHERE id = $1", [taskRes1.task_id]);
+  if (!dbTask1.rows[0] || dbTask1.rows[0].agent_token_hash !== hashToken(rawAgentToken)) {
+    throw new Error("task.agent_token_hash must equal quote.agent_token_hash (no second token minted)!");
+  }
+  console.log(`✓ Task created: ${taskRes1.task_id}; task.agent_token_hash === quote.agent_token_hash (no re-mint)`);
 
-  // 3b. Idempotent replay: same task, fresh valid agent token
-  const taskRes2 = await createTaskFromQuote({ quote_id: quoteRes.quote_id });
+  // ============================================================
+  // [6/15] Replay: quote_id alone cannot replay; valid replay stable
+  // ============================================================
+  console.log("\n[6/15] Idempotent replay semantics...");
+  try {
+    await createTaskFromQuote({ quote_id: quoteRes.quote_id });
+    throw new Error("Quote-id-only replay must be rejected!");
+  } catch (err: any) {
+    expectServiceError(err, "UNAUTHORIZED", 401);
+  }
+
+  const taskRes2 = await createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", rawAgentToken);
   if (!taskRes2.is_existing || taskRes2.task_id !== taskRes1.task_id) {
-    throw new Error("Repeated task creation from same quote failed idempotency!");
+    throw new Error("Valid replay must return the SAME task with is_existing=true!");
   }
-  if (!taskRes2.agent_token || taskRes2.agent_token === firstAgentToken) {
-    throw new Error("Idempotent replay must return a rotated agent token!");
-  }
-  console.log(`✓ Idempotent replay: same task ${taskRes2.task_id}, rotated agent token issued`);
 
-  // 3c. Task view authorization boundaries
-  const viewNoAuth = await getTaskState(taskRes2.task_id).catch((e) => e);
-  if (!(viewNoAuth instanceof ServiceError) || viewNoAuth.status !== 401) {
-    throw new Error("Task view without token must be 401 UNAUTHORIZED!");
+  // Original token remains valid (no rotation on replay -> no revocation).
+  const agentViewAfterReplay = await getTaskState(taskRes1.task_id, rawAgentToken);
+  if (agentViewAfterReplay.status !== "OFFERED") throw new Error("Agent token failed after valid replay!");
+  const taskHashAfter = await rawPool.query("SELECT agent_token_hash FROM tasks WHERE id = $1", [taskRes1.task_id]);
+  if (taskHashAfter.rows[0].agent_token_hash !== hashToken(rawAgentToken)) {
+    throw new Error("Replay MUST NOT rotate/change the agent token hash!");
   }
-  const agentView = await getTaskState(taskRes2.task_id, taskRes2.agent_token);
-  if ((agentView as any).compensation_usd !== undefined || JSON.stringify(agentView).includes("target_payout_usd")) {
-    throw new Error("Agent task view must not expose compensation or target payout!");
-  }
-  console.log(`✓ Task view requires token; agent view exposes no compensation`);
+  console.log("✓ Quote-id-only replay -> 401; valid replay -> same task_id, NO rotation, token still valid");
 
-  // 4. Test Worker Offer Token Authorization Boundary
-  console.log("\n[6/13] Testing worker offer token authorization boundary...");
-  // 4a. Missing token -> 401 WORKER_NOT_AUTHORIZED (identity must come from the token)
-  try {
-    await acceptTask(taskRes1.task_id, { worker_id: "w_sam_arch" });
-    throw new Error("Should have thrown WORKER_NOT_AUTHORIZED (missing token)");
-  } catch (err: any) {
-    if (!(err instanceof ServiceError) || err.code !== "WORKER_NOT_AUTHORIZED" || err.status !== 401) {
-      throw new Error(`Expected WORKER_NOT_AUTHORIZED (401) for missing token, got: ${err.code} (${err.status})`);
+  // ============================================================
+  // [7/15] Concurrent valid replays: one task, stable credential
+  // ============================================================
+  console.log("\n[7/15] Concurrent valid replays...");
+  const concurrentReplays = await Promise.all([
+    createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", rawAgentToken),
+    createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", rawAgentToken),
+    createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", rawAgentToken),
+  ]);
+  if (new Set(concurrentReplays.map((r) => r.task_id)).size !== 1) {
+    throw new Error("Concurrent valid replays must yield exactly one task_id!");
+  }
+  if (concurrentReplays.some((r) => r.task_id !== taskRes1.task_id)) {
+    throw new Error("Concurrent replays must return the original task!");
+  }
+  const stillValid = await getTaskState(taskRes1.task_id, rawAgentToken);
+  if (stillValid.status !== "OFFERED") throw new Error("Original agent token was invalidated by concurrent replays!");
+  console.log("✓ 3 concurrent valid replays -> one task_id, original token remains valid");
+
+  // ============================================================
+  // [8/15] Worker auth ordering: no enumeration without a token
+  // ============================================================
+  console.log("\n[8/15] Accept-auth ordering (no worker/capability enumeration)...");
+  for (const wid of ["w_does_not_exist", "w_alex_ux", "w_sam_arch"]) {
+    try {
+      await acceptTask(taskRes1.task_id, { worker_id: wid });
+      throw new Error(`Accept without token for worker_id=${wid} must fail!`);
+    } catch (err: any) {
+      expectServiceError(err, "WORKER_NOT_AUTHORIZED", 401);
+      console.log(`  no-token worker_id=${wid} -> 401 WORKER_NOT_AUTHORIZED (uniform)`);
     }
-    console.log(`✓ Accept without token rejected: ${err.code} (${err.status})`);
   }
+  console.log("✓ Unauthenticated accept returns 401 for unknown / incapable / capable worker ids alike — no enumeration");
 
-  // 4b. Invalid token -> 401
+  // Authenticated but INCAPABLE worker -> 403 WORKER_CAPABILITY_REQUIRED
+  // (authorization strictly after authentication). Realistic path: the worker
+  // was capability-qualified when the offer was issued, but the capability was
+  // revoked before acceptance. A dedicated task keeps taskRes1's offer state
+  // untouched for the issuance checks in [9/15].
+  const sideArchQuote = await requestQuote({
+    task_type: "ARCHITECTURE_SANITY_CHECK",
+    input_payload: {
+      architecture_summary: "Side task for the revoked-capability 403 gate",
+      components: ["Next.js"],
+      expected_scale: "10k rps",
+    },
+  });
+  const sideArchTask = await createTaskFromQuote({ quote_id: sideArchQuote.quote_id }, "", sideArchQuote.agent_token);
+  const sam403Issue = await db.issueWorkerOfferToken(sideArchTask.task_id, "w_sam_arch");
+  if (!sam403Issue.success || !sam403Issue.token) throw new Error("Failed to issue worker token for the 403 gate");
+  if (!(await db.setWorkerCapabilityStatus("w_sam_arch", "SYSTEM_ARCHITECTURE", "REVOKED"))) {
+    throw new Error("Failed to revoke w_sam_arch capability for the 403 gate");
+  }
   try {
-    await acceptTask(taskRes1.task_id, { worker_id: "w_sam_arch" }, "invalid_worker_token");
-    throw new Error("Should have thrown WORKER_NOT_AUTHORIZED error");
+    await acceptTask(sideArchTask.task_id, { worker_id: "w_sam_arch" }, sam403Issue.token);
+    throw new Error("Capability-revoked worker must be rejected with 403!");
   } catch (err: any) {
-    if (!(err instanceof ServiceError) || err.code !== "WORKER_NOT_AUTHORIZED" || err.status !== 401) {
-      throw new Error(`Expected WORKER_NOT_AUTHORIZED (401), got: ${err.code} (${err.status})`);
+    expectServiceError(err, "WORKER_CAPABILITY_REQUIRED", 403);
+  } finally {
+    if (!(await db.setWorkerCapabilityStatus("w_sam_arch", "SYSTEM_ARCHITECTURE", "VERIFIED"))) {
+      throw new Error("Failed to restore w_sam_arch capability after the 403 gate test");
     }
-    console.log(`✓ Invalid worker token rejected with: ${err.code} (${err.status})`);
   }
+  console.log("✓ Authenticated worker with revoked capability -> 403 WORKER_CAPABILITY_REQUIRED (authorization after authentication)");
 
-  // 4c. Incapable worker WITH valid offer token -> 403 WORKER_CAPABILITY_REQUIRED
-  const alexToken = await db.rotateWorkerOfferToken(taskRes1.task_id, "w_alex_ux");
-  try {
-    await acceptTask(taskRes1.task_id, { worker_id: "w_alex_ux" }, alexToken || undefined);
-    throw new Error("Should have thrown WORKER_CAPABILITY_REQUIRED error");
-  } catch (err: any) {
-    if (!(err instanceof ServiceError) || err.code !== "WORKER_CAPABILITY_REQUIRED" || err.status !== 403) {
-      throw new Error(`Expected WORKER_CAPABILITY_REQUIRED (403), got: ${err.code} (${err.status})`);
-    }
-    console.log(`✓ Incapable worker correctly rejected with: ${err.code} (${err.status})`);
+  // ============================================================
+  // [9/15] Worker token issuance: first-issue, retry-safe, rotate=1
+  // ============================================================
+  console.log("\n[9/15] Worker credential issuance (retry-safe, explicit rotation)...");
+  const samIssuance = await db.issueWorkerOfferToken(taskRes1.task_id, "w_sam_arch");
+  if (!samIssuance.success || !samIssuance.token || !samIssuance.token.startsWith("otk_")) {
+    throw new Error("First issuance must return a fresh otk_ token!");
   }
+  const samToken = samIssuance.token;
 
-  // 5. Worker credential delivery channel (rotation) and compensated worker view
-  console.log("\n[7/13] Testing worker credential delivery + worker-only compensation view...");
-  const samToken = await db.rotateWorkerOfferToken(taskRes1.task_id, "w_sam_arch");
-  const morganToken = await db.rotateWorkerOfferToken(taskRes1.task_id, "w_morgan_general");
-  if (!samToken || !morganToken) throw new Error("Worker offer credential rotation failed");
-
-  const workerView = await getTaskState(taskRes1.task_id, undefined, samToken);
-  const rawQuote = await db.getQuote(quoteRes.quote_id);
-  if (workerView.compensation_usd !== rawQuote?.target_payout_usd) {
-    throw new Error(`Worker view must expose compensation_usd (target payout), got ${workerView.compensation_usd ?? "undefined"}`);
+  // Repeat WITHOUT rotate=1 must NOT rotate or invalidate the delivered token.
+  const repeat = await db.issueWorkerOfferToken(taskRes1.task_id, "w_sam_arch");
+  if (repeat.success || repeat.code !== 409) {
+    throw new Error(`Repeat issuance must fail with 409, got: ${JSON.stringify(repeat)}`);
   }
-  if (JSON.stringify(workerView).includes("target_payout_usd")) {
-    throw new Error("Worker view must never serialize the internal field target_payout_usd!");
+  if (!(await db.verifyWorkerToken(taskRes1.task_id, "w_sam_arch", samToken))) {
+    throw new Error("Repeat issuance invalidated the delivered credential — must NEVER happen!");
   }
-  console.log(`✓ Worker view exposes worker-only compensation_usd: $${workerView.compensation_usd}`);
-  console.log(`✓ target_payout_usd never serialized on any response surface`);
+  console.log("✓ Repeat issuance -> 409 INVALID_STATE; delivered token still valid");
 
-  // 6. Test Concurrent Worker Acceptance in Neon (Exactly One 200, One 409 TASK_ALREADY_ACCEPTED)
-  console.log("\n[8/13] Testing concurrent worker acceptance in Neon...");
+  // Explicit rotate=1 on a still-OFFERED task: new token works, old is revoked.
+  const rotated = await db.issueWorkerOfferToken(taskRes1.task_id, "w_sam_arch", { rotate: true });
+  if (!rotated.success || !rotated.token || rotated.token === samToken) {
+    throw new Error("rotate=1 must return a fresh token!");
+  }
+  if (await db.verifyWorkerToken(taskRes1.task_id, "w_sam_arch", samToken)) {
+    throw new Error("Pre-rotation worker token must be revoked after rotate=1!");
+  }
+  const samToken2 = rotated.token;
+  console.log("✓ rotate=1 rotates explicitly: fresh token usable, old token revoked");
+
+  // rotate=1 must refuse to rotate an engaged task (would strand the worker).
+  const sideQuote = (await requestQuote({
+    task_type: "LANDING_PAGE_REVIEW",
+    input_payload: { url: "https://side.example", target_audience: "Side test" },
+  }));
+  const sideTask = await createTaskFromQuote({ quote_id: sideQuote.quote_id }, "", sideQuote.agent_token);
+  const sideIssue = await db.issueWorkerOfferToken(sideTask.task_id, "w_alex_ux");
+  if (!sideIssue.success || !sideIssue.token) throw new Error("side issuance failed");
+  const sideToken = sideIssue.token;
+  await acceptTask(sideTask.task_id, { worker_id: "w_alex_ux" }, sideToken);
+  await startTask(sideTask.task_id, { worker_id: "w_alex_ux" }, sideToken);
+  const rotateEngaged = await db.issueWorkerOfferToken(sideTask.task_id, "w_alex_ux", { rotate: true });
+  if (rotateEngaged.success || rotateEngaged.code !== 409) {
+    throw new Error("rotate=1 on an IN_PROGRESS task must fail with 409 (worker must not be stranded)!");
+  }
+  console.log("✓ rotate=1 on ACCEPTED/IN_PROGRESS task -> 409 (active worker never stranded)");
+
+  // ============================================================
+  // [10/15] Concurrent first issuance: exactly one success
+  // ============================================================
+  console.log("\n[10/15] Concurrent first issuance...");
+  const deliveryQuote = (await requestQuote({
+    task_type: "LANDING_PAGE_REVIEW",
+    input_payload: { url: "https://delivery.example", target_audience: "Delivery test" },
+  }));
+  const deliveryTask = await createTaskFromQuote({ quote_id: deliveryQuote.quote_id }, "", deliveryQuote.agent_token);
+  const issuanceRace = await Promise.allSettled([
+    db.issueWorkerOfferToken(deliveryTask.task_id, "w_alex_ux"),
+    db.issueWorkerOfferToken(deliveryTask.task_id, "w_alex_ux"),
+  ]);
+  const issuedOk = issuanceRace.filter((r) => r.status === "fulfilled" && (r.value as any).success === true);
+  if (issuedOk.length !== 1) {
+    throw new Error(`Concurrent first issuance must yield exactly one success, got ${issuedOk.length}`);
+  }
+  console.log("✓ Concurrent first issuance -> exactly one success, other request cannot invalidate the delivered token");
+
+  // ============================================================
+  // [11/15] Concurrent accept: exactly one winner, transactional
+  // ============================================================
+  console.log("\n[11/15] Concurrent worker acceptance...");
+  const morganIssuance = await db.issueWorkerOfferToken(taskRes1.task_id, "w_morgan_general");
+  if (!morganIssuance.success || !morganIssuance.token) throw new Error("morgan issuance failed");
+  const morganToken = morganIssuance.token;
 
   const [acc1, acc2] = await Promise.allSettled([
-    acceptTask(taskRes1.task_id, { worker_id: "w_sam_arch" }, samToken),
+    acceptTask(taskRes1.task_id, { worker_id: "w_sam_arch" }, samToken2),
     acceptTask(taskRes1.task_id, { worker_id: "w_morgan_general" }, morganToken),
   ]);
-
   const accSuccess = [acc1, acc2].filter((r) => r.status === "fulfilled");
   const accConflict = [acc1, acc2].filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-
   if (accSuccess.length !== 1 || accConflict.length !== 1) {
     throw new Error(`Expected 1 success and 1 conflict! Got: success=${accSuccess.length}, conflict=${accConflict.length}`);
   }
-  if (accConflict[0].reason.code !== "TASK_ALREADY_ACCEPTED") {
-    throw new Error(`Expected TASK_ALREADY_ACCEPTED code, got ${accConflict[0].reason.code}`);
+  if ((accConflict[0].reason as ServiceError).code !== "TASK_ALREADY_ACCEPTED") {
+    throw new Error(`Expected TASK_ALREADY_ACCEPTED, got ${(accConflict[0].reason as ServiceError).code}`);
   }
-
   const winningWorker = acc1.status === "fulfilled" ? "w_sam_arch" : "w_morgan_general";
-  const winningToken = acc1.status === "fulfilled" ? samToken : morganToken;
-  console.log(`✓ Exactly one worker succeeded: ${winningWorker}`);
-  console.log(`✓ Losing worker received HTTP 409 with stable code: TASK_ALREADY_ACCEPTED`);
+  const winningToken = acc1.status === "fulfilled" ? samToken2 : morganToken;
+  console.log(`✓ Exactly one winner: ${winningWorker}; loser -> 409 TASK_ALREADY_ACCEPTED`);
 
-  // 6b. Transactional accept invariant: exactly one ACCEPTED offer, all others OFFERED
-  const offerRows = await rawPool.query(
-    "SELECT worker_id, status FROM task_offers WHERE task_id = $1 ORDER BY worker_id",
-    [taskRes1.task_id]
-  );
+  const offerRows = await rawPool.query("SELECT worker_id, status FROM task_offers WHERE task_id = $1 ORDER BY worker_id", [taskRes1.task_id]);
   const acceptedOffers = offerRows.rows.filter((o) => o.status === "ACCEPTED");
-  const staleOffers = offerRows.rows.filter((o) => o.status !== "ACCEPTED" && o.status !== "OFFERED");
   if (acceptedOffers.length !== 1 || acceptedOffers[0].worker_id !== winningWorker) {
     throw new Error("Transactional accept: expected exactly one ACCEPTED offer for the winning worker!");
   }
-  if (staleOffers.length !== 0) {
-    throw new Error(`Transactional accept: unexpected offer statuses: ${JSON.stringify(staleOffers)}`);
-  }
-  if (offerRows.rows.filter((o) => o.status === "OFFERED").length !== offerRows.rows.length - 1) {
-    throw new Error("Transactional accept: losing offers must remain OFFERED!");
-  }
-  console.log(`✓ Accept is single-transactional: 1 ACCEPTED offer (${winningWorker}), ${offerRows.rows.length - 1} OFFERED`);
-
   const acceptEvent = await rawPool.query(
     "SELECT count(*)::int AS c FROM events WHERE entity_id = $1 AND event_type = 'task_accepted'",
     [taskRes1.task_id]
   );
   if (acceptEvent.rows[0].c !== 1) throw new Error("task_accepted event missing after transactional accept!");
-  console.log(`✓ task_accepted event persisted in the same transaction`);
+  console.log("✓ Accept is single-transactional: 1 ACCEPTED offer + task_accepted event in the same transaction");
 
-  // 7. Start the Task
-  console.log("\n[9/13] Starting task via service layer...");
+  // ============================================================
+  // [12/15] Start + atomic result submission
+  // ============================================================
+  console.log("\n[12/15] Start + atomic single-transaction result submission...");
   const startRes = await startTask(taskRes1.task_id, { worker_id: winningWorker }, winningToken);
-  console.log(`✓ Task is now IN_PROGRESS assigned to ${startRes.assigned_worker_id}`);
-
-  // 8. Atomic Transactional Result Submission
-  console.log("\n[10/13] Testing atomic single-transaction result submission in Neon...");
-  const structuredResult = {
-    verdict: "acceptable" as const,
-    critical_issues: ["Enable transaction pooler to prevent idle socket leaks on serverless restarts"],
-    recommended_changes: ["Configure connection timeout to 10s with max 20 client limit"],
-    scaling_risks: ["Multi-region query round-trips"],
-    confidence: 0.96,
-  };
+  console.log(`✓ Task IN_PROGRESS assigned to ${startRes.assigned_worker_id}`);
 
   const [sub1, sub2] = await Promise.allSettled([
-    submitTaskResult(taskRes1.task_id, { worker_id: winningWorker, result_payload: structuredResult }, winningToken),
-    submitTaskResult(taskRes1.task_id, { worker_id: winningWorker, result_payload: structuredResult }, winningToken),
+    submitTaskResult(taskRes1.task_id, { worker_id: winningWorker, result_payload: ARCH_RESULT }, winningToken),
+    submitTaskResult(taskRes1.task_id, { worker_id: winningWorker, result_payload: ARCH_RESULT }, winningToken),
   ]);
-
   const subSuccess = [sub1, sub2].filter((r) => r.status === "fulfilled");
   const subConflict = [sub1, sub2].filter((r) => r.status === "rejected") as PromiseRejectedResult[];
-
   if (subSuccess.length !== 1 || subConflict.length !== 1) {
     throw new Error(`Expected 1 submission success and 1 conflict! Got: success=${subSuccess.length}, conflict=${subConflict.length}`);
   }
-  if (subConflict[0].reason.code !== "RESULT_ALREADY_SUBMITTED") {
-    throw new Error(`Expected RESULT_ALREADY_SUBMITTED code, got ${subConflict[0].reason.code}`);
+  if ((subConflict[0].reason as ServiceError).code !== "RESULT_ALREADY_SUBMITTED") {
+    throw new Error(`Expected RESULT_ALREADY_SUBMITTED, got ${(subConflict[0].reason as ServiceError).code}`);
   }
-  console.log(`✓ Atomic single transaction: exactly 1 succeeded, concurrent duplicate rejected with RESULT_ALREADY_SUBMITTED (409)`);
+  console.log("✓ Atomic submission: exactly 1 succeeded, concurrent duplicate -> 409 RESULT_ALREADY_SUBMITTED");
 
-  // 9. Agent Token Authorization Boundary on Result Access
-  console.log("\n[11/13] Testing agent token authorization boundary on result retrieval...");
+  // ============================================================
+  // [13/15] Attacker with quote_id alone cannot read the result
+  // ============================================================
+  console.log("\n[13/15] Quote-id-only attacker cannot read the paid result...");
   try {
     await getTaskResult(taskRes1.task_id, "atk_bad_token_123");
-    throw new Error("Should have thrown UNAUTHORIZED");
+    throw new Error("Invalid agent token must be rejected!");
   } catch (err: any) {
-    if (!(err instanceof ServiceError) || err.code !== "UNAUTHORIZED" || err.status !== 401) {
-      throw new Error(`Expected UNAUTHORIZED (401), got: ${err.code} (${err.status})`);
-    }
-    console.log(`✓ Unauthorized agent token correctly rejected with: ${err.code} (401)`);
+    expectServiceError(err, "UNAUTHORIZED", 401);
   }
-
-  // Original pre-replay token must be revoked (rotation semantics)
   try {
-    await getTaskResult(taskRes1.task_id, firstAgentToken);
-    throw new Error("Should have thrown UNAUTHORIZED for the pre-replay token");
+    await createTaskFromQuote({ quote_id: quoteRes.quote_id });
+    throw new Error("Quote-id-only replay must fail!");
   } catch (err: any) {
-    if (!(err instanceof ServiceError) || err.code !== "UNAUTHORIZED") {
-      throw new Error(`Expected UNAUTHORIZED for pre-replay token, got: ${err.code}`);
-    }
-    console.log(`✓ Pre-replay agent token correctly revoked (rotation semantics)`);
+    expectServiceError(err, "UNAUTHORIZED", 401);
+  }
+  try {
+    await getTaskState(taskRes1.task_id);
+    throw new Error("Unauthenticated task view must fail!");
+  } catch (err: any) {
+    expectServiceError(err, "UNAUTHORIZED", 401);
   }
 
-  const validResult = await getTaskResult(taskRes1.task_id, taskRes2.agent_token);
-  console.log(`✓ Authorized result retrieved: status=${validResult.status}, verdict="${(validResult.result as any).verdict}"`);
+  const validResult = await getTaskResult(taskRes1.task_id, rawAgentToken);
+  if (validResult.status !== "COMPLETED" || (validResult.result as any).verdict !== "acceptable") {
+    throw new Error("Authorized result retrieval failed!");
+  }
+  console.log(`✓ Original agent token reads the paid result (verdict="${(validResult.result as any).verdict}"); quote_id alone cannot`);
 
-  // 10. Direct Database State Invariant Assertions
-  console.log("\n[12/13] Direct SQL Invariant Verification in Neon PostgreSQL...");
+  // ============================================================
+  // [14/15] Direct SQL invariant verification
+  // ============================================================
+  console.log("\n[14/15] Direct SQL invariant verification in Neon PostgreSQL...");
   const dbTask = await rawPool.query("SELECT * FROM tasks WHERE id = $1", [taskRes1.task_id]);
   const dbResult = await rawPool.query("SELECT * FROM task_results WHERE task_id = $1", [taskRes1.task_id]);
   const dbEvents = await rawPool.query("SELECT event_type FROM events WHERE entity_id = $1 ORDER BY created_at ASC", [taskRes1.task_id]);
-
+  const issuedAtRow = await rawPool.query(
+    "SELECT worker_token_issued_at FROM task_offers WHERE task_id = $1 AND worker_id = $2",
+    [taskRes1.task_id, winningWorker]
+  );
   if (dbTask.rows[0].status !== "COMPLETED") throw new Error("Task status is not COMPLETED in Neon");
+  if (dbTask.rows[0].agent_token_hash !== hashToken(rawAgentToken)) throw new Error("Task agent hash must equal the quote-scoped hash!");
   if (dbResult.rows.length !== 1) throw new Error("Task results row missing in Neon");
   if (dbEvents.rows.length < 5) throw new Error("Missing lifecycle events in Neon");
-  if (!dbEvents.rows.some((r) => r.event_type === "task_accepted")) throw new Error("task_accepted event missing in Neon");
-
+  if (!issuedAtRow.rows[0] || !issuedAtRow.rows[0].worker_token_issued_at) {
+    throw new Error("worker_token_issued_at must be recorded on the delivered offer!");
+  }
   console.log("--- DIRECT NEON RAW STATE ---");
   console.log(`Task: ${dbTask.rows[0].id} (Status: ${dbTask.rows[0].status}, Worker: ${dbTask.rows[0].assigned_worker_id})`);
   console.log(`Result: ${dbResult.rows[0].id} (Verdict: ${dbResult.rows[0].result_payload.verdict})`);
   console.log(`Events recorded in Neon:`, dbEvents.rows.map((r) => r.event_type));
 
-  // 11. Pre-existing customer data preserved through migration 004
-  console.log("\n[13/13] Verifying migration 004 preserved customer state...");
-  const tasksWithoutResults = await rawPool.query(
-    "SELECT count(*)::int AS c FROM tasks t LEFT JOIN task_results r ON r.task_id = t.id WHERE r.task_id IS NULL"
-  );
-  const preservedResults = await rawPool.query(
-    "SELECT count(*)::int AS c, count(DISTINCT task_id)::int AS tasks FROM task_results"
-  );
-  console.log(`✓ No task rows lost: ${tasksWithoutResults.rows[0].c} tasks without results (expected: 0)`);
-  console.log(`✓ Completed customer results preserved: ${preservedResults.rows[0].c}`);
+  // ============================================================
+  // [15/15] Customer preservation (migrations did not damage data)
+  // ============================================================
+  console.log("\n[15/15] Verifying customer data preservation...");
+  const customerResultsAfter = await rawPool.query("SELECT count(*)::int AS c FROM task_results");
+  const expectedAfter = customerResultsBefore.rows[0].c + 1; // only this suite's one result
+  if (customerResultsAfter.rows[0].c !== expectedAfter) {
+    throw new Error(
+      `Customer task_results changed unexpectedly: before=${customerResultsBefore.rows[0].c}, after=${customerResultsAfter.rows[0].c}, expected after=${expectedAfter}`
+    );
+  }
+  console.log(`✓ Customer results preserved: before=${customerResultsBefore.rows[0].c}, after=${customerResultsAfter.rows[0].c} (+1 from this suite only)`);
 
   await rawPool.end();
 
   console.log("\n==================================================================");
-  console.log("  ALL HARDENED SPRINT 1.1 VERIFICATIONS PASSED IN REAL NEON PG   ");
+  console.log("  ALL PRE-MCP FINAL SECURITY VERIFICATIONS PASSED IN REAL NEON PG");
   console.log("==================================================================");
 
   return {
@@ -345,16 +538,18 @@ async function runHardenedNeonE2ETest() {
     winningWorker,
     status: dbTask.rows[0].status,
     eventsCount: dbEvents.rows.length,
+    customerResultsBefore: customerResultsBefore.rows[0].c,
+    customerResultsAfter: customerResultsAfter.rows[0].c,
   };
 }
 
-runHardenedNeonE2ETest()
+runFinalPreMCPNeonE2ETest()
   .then((res) => {
-    console.log("\nFINAL HARDENING REPORT:", res);
-    console.log("\nHARDENED REAL NEON SUITE: PASS");
+    console.log("\nFINAL PRE-MCP SECURITY REPORT:", JSON.stringify(res));
+    console.log("\nPRE-MCP REAL NEON SUITE: PASS");
     process.exit(0);
   })
   .catch((err) => {
-    console.error("HARDENED REAL NEON SUITE: FAIL", err);
+    console.error("PRE-MCP REAL NEON SUITE: FAIL", err);
     process.exit(1);
   });

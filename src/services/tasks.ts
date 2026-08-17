@@ -10,7 +10,6 @@ export interface CreateTaskOutput {
   status: string;
   customer_price_usd: number;
   estimated_minutes: number;
-  agent_token?: string;
   worker_task_url: string;
   offers?: Array<{ worker_id: string; worker_url: string }>;
   created_at: string;
@@ -34,7 +33,7 @@ export interface TaskStateResponse {
   compensation_usd?: number;
 }
 
-export async function createTaskFromQuote(input: unknown, origin: string = ""): Promise<CreateTaskOutput> {
+export async function createTaskFromQuote(input: unknown, origin: string = "", agentToken?: string): Promise<CreateTaskOutput> {
   const parseResult = CreateTaskRequestSchema.safeParse(input);
   if (!parseResult.success) {
     throw new ServiceError("Invalid request payload", "INVALID_INPUT", 400, parseResult.error.format());
@@ -42,27 +41,39 @@ export async function createTaskFromQuote(input: unknown, origin: string = ""): 
 
   const { quote_id } = parseResult.data;
 
+  // AGENT CAPABILITY IS QUOTE-SCOPED: the high-entropy token minted at quote
+  // creation is mandatory. quote_id alone must never be a credential — without
+  // the token a replay can neither mint nor revoke anything.
+  if (!agentToken) {
+    throw new ServiceError("Agent task token is required", "UNAUTHORIZED", 401);
+  }
+
   // 1. Fetch quote
   const quote = await db.getQuote(quote_id);
   if (!quote) {
     throw new ServiceError(`Quote '${quote_id}' not found`, "TASK_NOT_FOUND", 404);
   }
 
-  // 2. Check quote expiration
+  // 2. Verify the agent token against the quote-scoped capability (fail closed)
+  if (!(await db.verifyQuoteAgentToken(quote_id, agentToken))) {
+    throw new ServiceError("Unauthorized: invalid agent task token for this quote", "UNAUTHORIZED", 401);
+  }
+
+  // 3. Check quote expiration
   if (new Date(quote.expires_at).getTime() < Date.now()) {
     throw new ServiceError("Quote has expired", "QUOTE_EXPIRED", 400, { quote_id, expires_at: quote.expires_at });
   }
 
-  // 3. Create task atomically (idempotent replays are handled inside db.createTask,
-  // which rotates the agent token so the replaying agent is never stranded)
+  // 4. Create task atomically (idempotent replays return the SAME task with the
+  //    same credential — no rotation, no minting, no revocation)
   const taskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
-  // 4. Create task atomically
   const createRes = await db.createTask({
     id: taskId,
     quote_id: quote.id,
     task_type_id: quote.task_type_id,
     input_payload: quote.input_payload,
+    agent_token_hash: quote.agent_token_hash,
   });
 
   if (createRes.is_existing) {
@@ -73,7 +84,6 @@ export async function createTaskFromQuote(input: unknown, origin: string = ""): 
       status: createRes.task.status,
       customer_price_usd: quote.quoted_price_usd,
       estimated_minutes: quote.estimated_minutes,
-      agent_token: createRes.agent_token,
       worker_task_url: `${origin}/tasks/${createRes.task.id}`,
       created_at: createRes.task.created_at,
       is_existing: true,
@@ -105,7 +115,6 @@ export async function createTaskFromQuote(input: unknown, origin: string = ""): 
     status: createRes.task.status,
     customer_price_usd: quote.quoted_price_usd,
     estimated_minutes: quote.estimated_minutes,
-    agent_token: createRes.agent_token,
     worker_task_url: workerTaskUrl,
     offers: createRes.offers.map((o) => ({
       worker_id: o.worker_id,
@@ -173,18 +182,15 @@ export async function acceptTask(taskId: string, input: unknown, workerToken?: s
 
   const { worker_id } = parseResult.data;
 
-  const worker = await db.getWorker(worker_id);
-  if (!worker) {
-    throw new ServiceError(`Worker '${worker_id}' not found`, "WORKER_NOT_AUTHORIZED", 404);
-  }
-
-  const acceptRes = await db.acceptTask(taskId, worker_id, workerToken, {
+  // Authentication happens INSIDE db.acceptTask before any worker or capability
+  // lookup. worker_id (if provided) is only a consistency assertion; it never
+  // authenticates or selects identity. Unauthenticated callers receive 401
+  // regardless of worker existence, capability, or offer state.
+  const acceptRes = await db.acceptTask(taskId, workerToken, worker_id, {
     eventType: "task_accepted",
     entityType: "task",
     entityId: taskId,
     payload: {
-      worker_id,
-      worker_name: worker.display_name,
       status: "ACCEPTED",
     },
   });

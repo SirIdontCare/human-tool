@@ -117,7 +117,10 @@ export const CreateTaskRequestSchema = z.object({
 });
 
 export const AcceptTaskRequestSchema = z.object({
-  worker_id: z.string().min(1, "worker_id is required"),
+  // worker_id is an OPTIONAL consistency assertion. Identity is always derived
+  // from the per-offer worker token; worker_id never authenticates or selects
+  // identity.
+  worker_id: z.string().min(1).optional(),
 });
 
 export const StartTaskRequestSchema = z.object({

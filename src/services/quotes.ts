@@ -18,6 +18,9 @@ export interface QuoteResponse {
   required_capability: string;
   expires_at: string;
   created_at: string;
+  // Raw agent capability token, returned exactly once at quote creation.
+  // Stored server-side ONLY as a SHA-256 hash; never logged or persisted raw.
+  agent_token: string;
 }
 
 export async function requestQuote(input: unknown): Promise<QuoteResponse> {
@@ -57,14 +60,14 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
   const quoteId = `quote_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
-  // Log quote requested event
+  // Log quote requested event (NEVER the raw agent token)
   await logEvent("quote_requested", "quote", quoteId, {
     task_type,
     input_payload: inputValidation.data,
     deadline_minutes,
   });
 
-  const quote = await db.createQuote({
+  const created = await db.createQuote({
     id: quoteId,
     task_type_id: taskType.id,
     input_payload: inputValidation.data as Record<string, unknown>,
@@ -73,15 +76,18 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
     estimated_minutes: taskType.default_sla_minutes,
     expires_at: expiresAt,
   });
+  const quote = created.quote;
 
-  // Log quote created event
+  // Log quote created event (NEVER the raw agent token)
   await logEvent("quote_created", "quote", quoteId, {
     task_type,
     customer_price_usd: quote.quoted_price_usd,
     expires_at: quote.expires_at,
   });
 
-  // AGENT-FACING DATA SAFETY: DO NOT expose target_payout_usd or internal platform margin
+  // AGENT-FACING DATA SAFETY: DO NOT expose target_payout_usd or internal platform margin.
+  // The raw agent token IS returned here — exactly once — because the agent
+  // capability is quote-scoped and quote_id alone is never a credential.
   return {
     available: true,
     quote_id: quote.id,
@@ -91,5 +97,6 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
     required_capability: taskType.required_capability,
     expires_at: quote.expires_at,
     created_at: quote.created_at,
+    agent_token: created.agent_token,
   };
 }

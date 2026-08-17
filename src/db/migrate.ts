@@ -6,6 +6,50 @@ import { loadEnvConfig } from "@next/env";
 // Load Next.js environment variables (.env, .env.local, etc.)
 loadEnvConfig(process.cwd());
 
+// Migration 004 reconciles legacy drift destructively. Before it is applied to
+// a database where it is not yet applied, run a safety preflight so paid
+// customer deliverables are never silently deleted or corrupted:
+//
+//  A. A duplicate quote_id group containing MORE THAN ONE task_result would
+//     lose a paid result during dedup -> ABORT with a clear operator error.
+//  B. Legacy status SUBMITTED without a task_result would silently become a
+//     valid COMPLETED task -> ABORT with a clear operator error.
+//
+// Fresh databases and databases where 004 is already applied pass naturally.
+export const PREFLIGHT_MIGRATION = "004_security_contract_reconciliation";
+
+export type QueryFn = (sql: string, params?: unknown[]) => Promise<unknown[]>;
+
+export async function preflightMigration004(query: QueryFn): Promise<void> {
+  const dupResultRows = (await query(
+    `SELECT t.quote_id, count(DISTINCT t.id)::int AS task_count, count(r.id)::int AS result_count
+     FROM tasks t
+     JOIN task_results r ON r.task_id = t.id
+     GROUP BY t.quote_id
+     HAVING count(DISTINCT t.id) > 1 AND count(r.id) > 1`
+  )) as Array<{ quote_id: string; task_count: number; result_count: number }>;
+
+  if (dupResultRows.length > 0) {
+    throw new Error(
+      "PREFLIGHT BLOCKED migration 004: duplicate quote_id groups contain multiple paid results " +
+        `(quote_ids: ${dupResultRows.map((r) => r.quote_id).join(", ")}). ` +
+        "Reconcile manually before applying 004 — paid deliverables must never be deleted."
+    );
+  }
+
+  const orphanSubmitted = (await query(
+    `SELECT id FROM tasks WHERE status = 'SUBMITTED' AND id NOT IN (SELECT task_id FROM task_results) LIMIT 1`
+  )) as Array<{ id: string }>;
+
+  if (orphanSubmitted.length > 0) {
+    throw new Error(
+      "PREFLIGHT BLOCKED migration 004: legacy status SUBMITTED exists without a task_result " +
+        `(task_id: ${orphanSubmitted[0].id}). Reconcile explicitly before applying 004 — ` +
+        "it must not silently become a valid COMPLETED task."
+    );
+  }
+}
+
 export async function runMigration() {
   const databaseUrl = process.env.DATABASE_URL;
   if (!databaseUrl) {
@@ -60,6 +104,15 @@ export async function runMigration() {
       const client: PoolClient = await pool.connect();
       try {
         await client.query("BEGIN");
+
+        // Safety preflight: migration 004 is destructive on drifted databases.
+        if (version === PREFLIGHT_MIGRATION) {
+          await preflightMigration004(async (sql, params: unknown[] = []) => {
+            const res = await client.query(sql, params);
+            return res.rows;
+          });
+        }
+
         await client.query(sql);
         await client.query(
           `INSERT INTO schema_migrations (version, applied_at) VALUES ($1, NOW())`,

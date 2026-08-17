@@ -8,8 +8,8 @@ export const RESULT_SCHEMAS: Record<string, Record<string, unknown>> = {
   LANDING_PAGE_REVIEW: {
     type: "object",
     properties: {
-      top_issues: { type: "array", items: { type: "string" } },
-      highest_impact_change: { type: "string" },
+      top_issues: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
+      highest_impact_change: { type: "string", minLength: 5 },
       conversion_blockers: { type: "array", items: { type: "string" } },
       confidence: { type: "number", minimum: 0, maximum: 1 },
     },
@@ -20,7 +20,7 @@ export const RESULT_SCHEMAS: Record<string, Record<string, unknown>> = {
     properties: {
       verdict: { type: "string", enum: ["good", "acceptable", "risky"] },
       critical_issues: { type: "array", items: { type: "string" } },
-      recommended_changes: { type: "array", items: { type: "string" } },
+      recommended_changes: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
       scaling_risks: { type: "array", items: { type: "string" } },
       confidence: { type: "number", minimum: 0, maximum: 1 },
     },
@@ -30,7 +30,7 @@ export const RESULT_SCHEMAS: Record<string, Record<string, unknown>> = {
     type: "object",
     properties: {
       verdict: { type: "string", enum: ["true", "false", "partial", "cannot_confirm"] },
-      explanation: { type: "string" },
+      explanation: { type: "string", minLength: 10 },
       confidence: { type: "number", minimum: 0, maximum: 1 },
       source_notes: { type: "string" },
     },

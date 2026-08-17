@@ -10,7 +10,36 @@ import { POST as submitTask } from "../src/app/api/tasks/[id]/submit/route";
 import { GET as getResult } from "../src/app/api/tasks/[id]/result/route";
 import { GET as getCatalogue } from "../src/app/api/catalogue/route";
 import { GET as getEvents } from "../src/app/api/events/route";
-import { GET as getWorkerAuth } from "../src/app/api/internal/worker-auth/route";
+import { POST as getWorkerAuth } from "../src/app/api/internal/worker-auth/route";
+
+async function createQuoteFixture() {
+  const { quote, agent_token } = await db.createQuote({
+    id: `quote_fixture_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+    task_type_id: "LANDING_PAGE_REVIEW",
+    input_payload: { url: "https://example.com", target_audience: "Devs" },
+    quoted_price_usd: 39.0,
+    target_payout_usd: 25.0,
+    estimated_minutes: 30,
+    expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+  });
+  return { quote, agent_token };
+}
+
+async function createTaskFixture(quote: { id: string; task_type_id: string; input_payload: Record<string, unknown>; agent_token_hash: string }) {
+  return db.createTask({
+    id: `task_fixture_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`,
+    quote_id: quote.id,
+    task_type_id: quote.task_type_id,
+    input_payload: quote.input_payload,
+    agent_token_hash: quote.agent_token_hash,
+  });
+}
+
+async function issueTokenFor(taskId: string, workerId: string) {
+  const issued = await db.issueWorkerOfferToken(taskId, workerId);
+  if (!issued.success || !issued.token) throw new Error(`failed to issue worker token for ${workerId}`);
+  return issued.token;
+}
 
 describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", () => {
   beforeEach(() => {
@@ -33,7 +62,7 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
   });
 
   it("should return stable error code WORKER_CAPABILITY_REQUIRED on incapable worker acceptance", async () => {
-    const quote = await db.createQuote({
+    const { quote } = await db.createQuote({
       id: "quote_route_test_cap",
       task_type_id: "ARCHITECTURE_SANITY_CHECK",
       input_payload: { architecture_summary: "Test description for validation", components: ["Next.js"], expected_scale: "10k" },
@@ -48,13 +77,19 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
       quote_id: quote.id,
       task_type_id: quote.task_type_id,
       input_payload: quote.input_payload,
+      agent_token_hash: quote.agent_token_hash,
     });
 
-    const alexToken = await db.rotateWorkerOfferToken(createRes.task.id, "w_alex_ux");
+    // w_sam_arch was capability-qualified when the offer was issued, but the
+    // required capability is revoked before acceptance: the capability gate
+    // evaluates after authentication, so the holder of a valid offer token is
+    // rejected with 403 WORKER_CAPABILITY_REQUIRED.
+    const samToken = await issueTokenFor(createRes.task.id, "w_sam_arch");
+    await db.setWorkerCapabilityStatus("w_sam_arch", "SYSTEM_ARCHITECTURE", "REVOKED");
 
     const acceptReq = new NextRequest("http://localhost:3000", {
       method: "POST",
-      body: JSON.stringify({ worker_id: "w_alex_ux", token: alexToken }),
+      body: JSON.stringify({ worker_id: "w_sam_arch", token: samToken }),
     });
     const acceptRes = await acceptTask(acceptReq, { params: Promise.resolve({ id: createRes.task.id }) });
     expect(acceptRes.status).toBe(403);
@@ -63,22 +98,8 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
   });
 
   it("should reject worker actions with 401 WORKER_NOT_AUTHORIZED when the offer token is missing", async () => {
-    const quote = await db.createQuote({
-      id: "quote_route_test_no_token",
-      task_type_id: "LANDING_PAGE_REVIEW",
-      input_payload: { url: "https://example.com", target_audience: "Devs" },
-      quoted_price_usd: 39.0,
-      target_payout_usd: 25.0,
-      estimated_minutes: 30,
-      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-    });
-
-    const createRes = await db.createTask({
-      id: "task_route_test_no_token",
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
-    });
+    const { quote } = await createQuoteFixture();
+    const createRes = await createTaskFixture(quote);
 
     const acceptReq = new NextRequest("http://localhost:3000", {
       method: "POST",
@@ -99,7 +120,7 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
   });
 
   it("should return stable error code UNAUTHORIZED on missing or bad agent token", async () => {
-    const quote = await db.createQuote({
+    const { quote, agent_token } = await db.createQuote({
       id: "quote_route_test_auth",
       task_type_id: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "Devs" },
@@ -114,16 +135,17 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
       quote_id: quote.id,
       task_type_id: quote.task_type_id,
       input_payload: quote.input_payload,
+      agent_token_hash: quote.agent_token_hash,
     });
 
-    const alexToken = await db.rotateWorkerOfferToken(createRes.task.id, "w_alex_ux");
-    await db.acceptTask(createRes.task.id, "w_alex_ux", alexToken || undefined);
-    await db.startTask(createRes.task.id, "w_alex_ux", alexToken || undefined);
+    const alexToken = await issueTokenFor(createRes.task.id, "w_alex_ux");
+    await db.acceptTask(createRes.task.id, alexToken, "w_alex_ux");
+    await db.startTask(createRes.task.id, "w_alex_ux", alexToken);
     await db.submitTaskResult({
       id: "res_route_auth",
       taskId: createRes.task.id,
       workerId: "w_alex_ux",
-      workerToken: alexToken || undefined,
+      workerToken: alexToken,
       resultPayload: {
         top_issues: ["Issue 1"],
         highest_impact_change: "Change 1",
@@ -138,9 +160,9 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
     const noTokenJson = await noTokenRes.json();
     expect(noTokenJson.code).toBe("UNAUTHORIZED");
 
-    // Request result with valid token in Authorization header
+    // Request result with valid quote-scoped agent token in Authorization header
     const authReq = new NextRequest("http://localhost:3000", {
-      headers: { Authorization: `Bearer ${createRes.agent_token}` },
+      headers: { Authorization: `Bearer ${agent_token}` },
     });
     const authRes = await getResult(authReq, { params: Promise.resolve({ id: createRes.task.id }) });
     expect(authRes.status).toBe(200);
@@ -149,7 +171,7 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
   });
 
   it("should require a valid agent or worker token for GET /api/tasks/:id", async () => {
-    const quote = await db.createQuote({
+    const { quote, agent_token } = await db.createQuote({
       id: "quote_route_test_read",
       task_type_id: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "Devs" },
@@ -164,8 +186,9 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
       quote_id: quote.id,
       task_type_id: quote.task_type_id,
       input_payload: quote.input_payload,
+      agent_token_hash: quote.agent_token_hash,
     });
-    const alexToken = await db.rotateWorkerOfferToken(createRes.task.id, "w_alex_ux");
+    const alexToken = await issueTokenFor(createRes.task.id, "w_alex_ux");
 
     // No token -> 401 UNAUTHORIZED
     const noTokenReq = new NextRequest("http://localhost:3000/api/tasks/x");
@@ -175,7 +198,7 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
 
     // Agent token -> 200, no worker-only fields
     const agentReq = new NextRequest("http://localhost:3000", {
-      headers: { "x-agent-token": createRes.agent_token },
+      headers: { "x-agent-token": agent_token },
     });
     const agentRes = await getTask(agentReq, { params: Promise.resolve({ id: createRes.task.id }) });
     expect(agentRes.status).toBe(200);
@@ -186,7 +209,7 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
 
     // Worker token -> 200 with worker-only compensation_usd
     const workerReq = new NextRequest("http://localhost:3000", {
-      headers: { "x-worker-token": alexToken || "" },
+      headers: { "x-worker-token": alexToken },
     });
     const workerRes = await getTask(workerReq, { params: Promise.resolve({ id: createRes.task.id }) });
     expect(workerRes.status).toBe(200);
@@ -202,8 +225,8 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
     expect(badRes.status).toBe(401);
   });
 
-  it("should return a valid agent token when POST /api/tasks is replayed idempotently", async () => {
-    const quote = await db.createQuote({
+  it("should fail closed without an agent token and replay idempotently with one", async () => {
+    const { quote, agent_token } = await db.createQuote({
       id: "quote_route_test_replay",
       task_type_id: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "Devs" },
@@ -213,35 +236,51 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
+    // quote_id alone (no credential) -> 401 UNAUTHORIZED
+    const noTokenReq = new NextRequest("http://localhost:3000/api/tasks", {
+      method: "POST",
+      body: JSON.stringify({ quote_id: quote.id }),
+    });
+    const noTokenRes = await createTask(noTokenReq);
+    expect(noTokenRes.status).toBe(401);
+    expect((await noTokenRes.json()).code).toBe("UNAUTHORIZED");
+
+    // Valid quote-scoped agent token -> creates the task exactly once
     const firstReq = new NextRequest("http://localhost:3000/api/tasks", {
       method: "POST",
+      headers: { "x-agent-token": agent_token },
       body: JSON.stringify({ quote_id: quote.id }),
     });
     const firstRes = await createTask(firstReq);
     expect(firstRes.status).toBe(201);
     const firstJson = await firstRes.json();
-    expect(firstJson.agent_token).toBeTruthy();
+    // The raw credential is never re-issued or included in the response
+    expect(firstJson.agent_token).toBeUndefined();
+    expect(firstJson.is_existing).toBe(false);
 
+    // Replay with the SAME token -> same task, is_existing=true, no rotation
     const replayReq = new NextRequest("http://localhost:3000/api/tasks", {
       method: "POST",
+      headers: { "x-agent-token": agent_token },
       body: JSON.stringify({ quote_id: quote.id }),
     });
     const replayRes = await createTask(replayReq);
     expect(replayRes.status).toBe(200);
     const replayJson = await replayRes.json();
     expect(replayJson.task_id).toBe(firstJson.task_id);
-    expect(replayJson.agent_token).toBeTruthy();
+    expect(replayJson.is_existing).toBe(true);
+    expect(replayJson.agent_token).toBeUndefined();
 
-    // The replay token authenticates to the existing task
+    // The original agent token still authenticates to the existing task
     const readReq = new NextRequest("http://localhost:3000", {
-      headers: { "x-agent-token": replayJson.agent_token },
+      headers: { "x-agent-token": agent_token },
     });
     const readRes = await getTask(readReq, { params: Promise.resolve({ id: replayJson.task_id }) });
     expect(readRes.status).toBe(200);
   });
 
   it("should not leak worker credentials or target_payout_usd through POST /api/tasks or GET /api/catalogue", async () => {
-    const quote = await db.createQuote({
+    const { quote, agent_token } = await db.createQuote({
       id: "quote_route_test_leak",
       task_type_id: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "Devs" },
@@ -253,6 +292,7 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
 
     const taskReq = new NextRequest("http://localhost:3000/api/tasks", {
       method: "POST",
+      headers: { "x-agent-token": agent_token },
       body: JSON.stringify({ quote_id: quote.id }),
     });
     const taskRes = await createTask(taskReq);
@@ -262,6 +302,8 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
     expect(serialized).not.toContain("worker_token");
     expect(serialized).not.toContain("otk_");
     expect(serialized).not.toContain("token=");
+    // The quote-scoped credential is only ever returned at quote creation
+    expect(serialized).not.toContain("atk_");
 
     const catRes = await getCatalogue();
     expect(catRes.status).toBe(200);
@@ -317,37 +359,27 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
     try {
       // No secret -> 401
       delete process.env.INTERNAL_DEV_SECRET;
-      const noSecretReq = new NextRequest("http://localhost:3000/api/internal/worker-auth?task_id=x&worker_id=w_alex_ux");
+      const noSecretReq = new NextRequest("http://localhost:3000/api/internal/worker-auth?task_id=x&worker_id=w_alex_ux", {
+        method: "POST",
+      });
       const noSecretRes = await getWorkerAuth(noSecretReq);
       expect(noSecretRes.status).toBe(401);
 
       // Wrong secret -> 401
       (process.env as Record<string, string | undefined>).INTERNAL_DEV_SECRET = "dev-secret-abc";
       const wrongReq = new NextRequest("http://localhost:3000/api/internal/worker-auth?task_id=x&worker_id=w_alex_ux", {
+        method: "POST",
         headers: { "x-internal-key": "wrong" },
       });
       expect((await getWorkerAuth(wrongReq)).status).toBe(401);
 
       // Valid secret -> fresh credential for an existing offer
-      const quote = await db.createQuote({
-        id: "quote_route_test_delivery",
-        task_type_id: "LANDING_PAGE_REVIEW",
-        input_payload: { url: "https://example.com", target_audience: "Devs" },
-        quoted_price_usd: 39.0,
-        target_payout_usd: 25.0,
-        estimated_minutes: 30,
-        expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-      });
-      const createRes = await db.createTask({
-        id: "task_route_test_delivery",
-        quote_id: quote.id,
-        task_type_id: quote.task_type_id,
-        input_payload: quote.input_payload,
-      });
+      const { quote } = await createQuoteFixture();
+      const createRes = await createTaskFixture(quote);
 
       const okReq = new NextRequest(
         `http://localhost:3000/api/internal/worker-auth?task_id=${createRes.task.id}&worker_id=w_alex_ux`,
-        { headers: { "x-internal-key": "dev-secret-abc" } }
+        { method: "POST", headers: { "x-internal-key": "dev-secret-abc" } }
       );
       const okRes = await getWorkerAuth(okReq);
       expect(okRes.status).toBe(200);
@@ -370,21 +402,8 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
   it("should never return raw internal exception text for INTERNAL_ERROR", async () => {
     // Trigger an internal error path: validate that the response shape is the fixed public message.
     // (Covers the handleServiceError convention used by every route.)
-    const quote = await db.createQuote({
-      id: "quote_route_test_internal",
-      task_type_id: "LANDING_PAGE_REVIEW",
-      input_payload: { url: "https://example.com", target_audience: "Devs" },
-      quoted_price_usd: 39.0,
-      target_payout_usd: 25.0,
-      estimated_minutes: 30,
-      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-    });
-    const createRes = await db.createTask({
-      id: "task_route_test_internal",
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
-    });
+    const { quote } = await createQuoteFixture();
+    const createRes = await createTaskFixture(quote);
 
     // A malformed route invocation (request body read failure) exercises the catch path.
     const badReq = new NextRequest("http://localhost:3000/api/tasks/x", { method: "GET" });
