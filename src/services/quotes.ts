@@ -87,7 +87,7 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
       context: String(rawData.context || ""),
     });
 
-    if (!match.matched) {
+    if (!match.matched || !match.capability_code) {
       // Record unmatched demand signal for product/capability analysis
       await logEvent("demand_unmatched", "demand", `unmatched_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`, {
         task_type: "HUMAN_JUDGMENT_REQUEST",
@@ -98,6 +98,7 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
         available: false,
         reason: "NO_MATCHING_HUMAN_CAPABILITY",
         matched_capability: null,
+        candidate_capability: null,
         timestamp: new Date().toISOString(),
       });
 
@@ -109,7 +110,32 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
       };
     }
 
-    matchedCapability = match.capability_code || taskType.required_capability;
+    // Live verification: check the actual database for at least one ACTIVE worker with VERIFIED capability
+    const qualifiedWorkers = await db.getWorkersByCapability(match.capability_code);
+    if (qualifiedWorkers.length === 0) {
+      // Lexically matched candidate capability, but no active verified worker currently exists
+      await logEvent("demand_unmatched", "demand", `unmatched_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`, {
+        task_type: "HUMAN_JUDGMENT_REQUEST",
+        requested_outcome: rawData.requested_outcome,
+        why_human_needed: rawData.why_human_needed,
+        required_expertise: rawData.required_expertise,
+        context: rawData.context,
+        available: false,
+        reason: "NO_MATCHING_HUMAN_CAPABILITY",
+        matched_capability: null,
+        candidate_capability: match.capability_code,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        available: false,
+        reason: "NO_MATCHING_HUMAN_CAPABILITY",
+        task_type: "HUMAN_JUDGMENT_REQUEST",
+        message: "No verified human capability is currently active for the requested expertise.",
+      };
+    }
+
+    matchedCapability = match.capability_code;
 
     // Record matched demand signal
     await logEvent("demand_matched", "demand", `demand_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`, {
@@ -119,6 +145,7 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
       required_expertise: rawData.required_expertise,
       available: true,
       matched_capability: matchedCapability,
+      candidate_capability: matchedCapability,
       timestamp: new Date().toISOString(),
     });
   }

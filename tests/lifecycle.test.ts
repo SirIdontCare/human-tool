@@ -1044,6 +1044,36 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
     expect(String(unmatchedEvent?.payload.required_expertise).toLowerCase()).toContain("securities lawyer");
     expect(unmatchedEvent?.payload.available).toBe(false);
   });
+
+  // 28. Open Demand Regression Test: Lexically matched capability returns unavailable if no ACTIVE VERIFIED worker exists
+  it("28. should return available=false with NO_MATCHING_HUMAN_CAPABILITY when a capability matches lexically but no ACTIVE VERIFIED worker exists", async () => {
+    // AI_VIDEO_REVIEW matches lexically, but revoke AI_VIDEO_REVIEW for w_founder (the only worker with this capability)
+    await db.setWorkerCapabilityStatus("w_founder", "AI_VIDEO_REVIEW", "REVOKED");
+
+    const quote = await requestQuote({
+      task_type: "HUMAN_JUDGMENT_REQUEST",
+      input_payload: {
+        requested_outcome: "Determine whether the AI-generated video shot has temporal defects or is client-ready.",
+        why_human_needed: "Vision language models cannot reliably judge commercial video aesthetics and subtle artifacts.",
+        required_expertise: "AI video generation quality assessment and commercial cinematography review.",
+        context: "Evaluating a 4-second cinematic establishing shot rendered with Sora 2.0 for a marketing campaign.",
+      },
+    });
+
+    expect(quote.available).toBe(false);
+    expect(quote.reason).toBe("NO_MATCHING_HUMAN_CAPABILITY");
+    expect(quote.agent_token).toBeUndefined();
+
+    // Verify unmatched demand event recorded candidate_capability
+    const events = await db.getEvents();
+    const unmatchedEvent = events.find(
+      (e) => e.event_type === "demand_unmatched" && e.payload.candidate_capability === "AI_VIDEO_REVIEW"
+    );
+    expect(unmatchedEvent).toBeDefined();
+    expect(unmatchedEvent?.payload.candidate_capability).toBe("AI_VIDEO_REVIEW");
+    expect(unmatchedEvent?.payload.matched_capability).toBeNull();
+    expect(unmatchedEvent?.payload.available).toBe(false);
+  });
 });
 
 type TaskStateNoComp = { compensation_usd?: unknown };
