@@ -9,9 +9,11 @@
     "lint": "eslint . --max-warnings 0",
     "test": "vitest run",
     "test:neon": "tsx scripts/neon-e2e-test.ts",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "tsx src/db/migrate.ts",
+    "mcp": "tsx src/mcp/index.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@neondatabase/serverless": "^0.10.4",
     "clsx": "^2.1.1",
     "dotenv": "^16.6.1",

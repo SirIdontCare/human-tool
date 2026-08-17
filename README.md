@@ -178,9 +178,70 @@ Query lifecycle events (`quote_requested`, `quote_created`, `task_created`, `tas
 
 ---
 
-## 5. Architecture & Constraints
+## 5. Model Context Protocol (MCP) Adapter (Private Alpha)
+
+> **Status: Private Alpha**
+> The human-tool MCP adapter exposes the Human Capability service layer to AI agents locally over `stdio` transport. Public hosted MCP endpoints are not yet available.
+
+### Start the MCP Server
+```bash
+npm run mcp
+```
+
+### Tool Flow
+```text
+AI Agent
+  │
+  ▼
+1. quote_human ─────────► Deterministic quote + agent_token credential
+  │
+  ▼
+2. call_human ──────────► Dispatches task to qualified humans (idempotent)
+  │
+  ▼
+3. get_result ──────────► Checks progress or retrieves structured verified outcome
+```
+
+### Available Tools
+
+#### 1. `quote_human`
+Request a deterministic quote and quote-scoped capability credential (`agent_token`) for qualified human work.
+- **Inputs:** `task_type` (`LANDING_PAGE_REVIEW` | `ARCHITECTURE_SANITY_CHECK` | `EXPERT_FACT_VERIFICATION`), `input_payload` (object).
+- **Outputs:** `quote_id`, `task_type`, `customer_price_usd`, `estimated_minutes`, `expires_at`, `agent_token`, `required_capability`.
+
+#### 2. `call_human`
+Create and dispatch a verified human task from an unexpired quote using the quote-scoped agent capability credential.
+- **Inputs:** `quote_id` (string), `agent_token` (string).
+- **Outputs:** `task_id`, `quote_id`, `task_type`, `status`, `customer_price_usd`, `estimated_minutes`, `is_existing`, `created_at`.
+
+#### 3. `get_result`
+Check progress and retrieve the verified structured human outcome for a task.
+- **Inputs:** `task_id` (string), `agent_token` (string).
+- **Outputs:**
+  - When in progress: `{ task_id, status: "IN_PROGRESS", is_ready: false, message: "..." }`
+  - When completed: `{ task_id, task_type, status: "COMPLETED", is_ready: true, result: { ... }, submitted_at, accepted_at }`
+
+### Example MCP Client Configuration
+
+#### `claude_desktop_config.json` / Claude Code / Cline
+```json
+{
+  "mcpServers": {
+    "human-tool": {
+      "command": "npx",
+      "args": ["-y", "tsx", "src/mcp/index.ts"],
+      "cwd": "/path/to/human-tool"
+    }
+  }
+}
+```
+
+---
+
+## 6. Architecture & Constraints
 - **Framework:** Next.js 15 (App Router) + TypeScript
-- **Database:** Neon PostgreSQL (`@neondatabase/serverless` / `pg`) with automated schema & seed runner
+- **MCP Adapter:** `@modelcontextprotocol/sdk` (stdio transport)
+- **Database:** Neon PostgreSQL (`@neondatabase/serverless` / `pg`) with numbered migrations
 - **Validation:** Zod
-- **Testing:** Vitest
+- **Testing:** Vitest (Lifecycle, API Route, and MCP Protocol suites)
 - **Scope Compliance:** Strictly adheres to `FOUNDING_SPEC.md`, `HUMAN_TASK_CATALOGUE.md`, `BUILD_SPEC.md`, `AGENTS.md`, and `DECISIONS.md`.

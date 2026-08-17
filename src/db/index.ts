@@ -218,6 +218,14 @@ export const db = {
     memStore.reset();
   },
 
+  // Close connection pool cleanly on shutdown
+  async close(): Promise<void> {
+    if (pgPool) {
+      await pgPool.end();
+      pgPool = null;
+    }
+  },
+
   // Raw query interface
   async query<T = unknown>(sql: string, params: unknown[] = []): Promise<T[]> {
     checkProductionDbSafety();
