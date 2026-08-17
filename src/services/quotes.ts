@@ -2,6 +2,7 @@ import { db } from "@/db";
 import { CreateQuoteRequestSchema, validateTaskInput } from "@/lib/schemas";
 import { ServiceError } from "@/lib/errors";
 import { logEvent } from "@/lib/events";
+import { matchHumanCapability } from "@/lib/matching";
 
 export interface RequestQuoteInput {
   task_type: string;
@@ -9,19 +10,35 @@ export interface RequestQuoteInput {
   deadline_minutes?: number;
 }
 
-export interface QuoteResponse {
-  available: boolean;
-  quote_id: string;
-  task_type: string;
-  customer_price_usd: number;
-  estimated_minutes: number;
-  required_capability: string;
-  expires_at: string;
-  created_at: string;
-  // Raw agent capability token, returned exactly once at quote creation.
-  // Stored server-side ONLY as a SHA-256 hash; never logged or persisted raw.
-  agent_token: string;
-}
+export type QuoteResponse =
+  | {
+      available: true;
+      quote_id: string;
+      task_type: string;
+      customer_price_usd: number;
+      estimated_minutes: number;
+      required_capability: string;
+      expires_at: string;
+      created_at: string;
+      // Raw agent capability token, returned exactly once at quote creation.
+      // Stored server-side ONLY as a SHA-256 hash; never logged or persisted raw.
+      agent_token: string;
+      reason?: never;
+      message?: never;
+    }
+  | {
+      available: false;
+      reason: string;
+      task_type: string;
+      message: string;
+      quote_id?: never;
+      customer_price_usd?: never;
+      estimated_minutes?: never;
+      required_capability?: never;
+      expires_at?: never;
+      created_at?: never;
+      agent_token?: never;
+    };
 
 export async function requestQuote(input: unknown): Promise<QuoteResponse> {
   const parseResult = CreateQuoteRequestSchema.safeParse(input);
@@ -57,6 +74,55 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
     );
   }
 
+  // 3. Open Demand Capability Matching (Sprint 2.2)
+  // For HUMAN_JUDGMENT_REQUEST: evaluate whether active worker capabilities can honestly satisfy the request.
+  let matchedCapability = taskType.required_capability;
+
+  if (task_type === "HUMAN_JUDGMENT_REQUEST") {
+    const rawData = inputValidation.data as Record<string, unknown>;
+    const match = matchHumanCapability({
+      requested_outcome: String(rawData.requested_outcome || ""),
+      why_human_needed: String(rawData.why_human_needed || ""),
+      required_expertise: String(rawData.required_expertise || ""),
+      context: String(rawData.context || ""),
+    });
+
+    if (!match.matched) {
+      // Record unmatched demand signal for product/capability analysis
+      await logEvent("demand_unmatched", "demand", `unmatched_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`, {
+        task_type: "HUMAN_JUDGMENT_REQUEST",
+        requested_outcome: rawData.requested_outcome,
+        why_human_needed: rawData.why_human_needed,
+        required_expertise: rawData.required_expertise,
+        context: rawData.context,
+        available: false,
+        reason: "NO_MATCHING_HUMAN_CAPABILITY",
+        matched_capability: null,
+        timestamp: new Date().toISOString(),
+      });
+
+      return {
+        available: false,
+        reason: "NO_MATCHING_HUMAN_CAPABILITY",
+        task_type: "HUMAN_JUDGMENT_REQUEST",
+        message: "No verified human capability is currently active for the requested expertise.",
+      };
+    }
+
+    matchedCapability = match.capability_code || taskType.required_capability;
+
+    // Record matched demand signal
+    await logEvent("demand_matched", "demand", `demand_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`, {
+      task_type: "HUMAN_JUDGMENT_REQUEST",
+      requested_outcome: rawData.requested_outcome,
+      why_human_needed: rawData.why_human_needed,
+      required_expertise: rawData.required_expertise,
+      available: true,
+      matched_capability: matchedCapability,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   const quoteId = `quote_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
@@ -65,6 +131,7 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
     task_type,
     input_payload: inputValidation.data,
     deadline_minutes,
+    matched_capability: matchedCapability !== taskType.required_capability ? matchedCapability : undefined,
   });
 
   const created = await db.createQuote({
@@ -94,7 +161,7 @@ export async function requestQuote(input: unknown): Promise<QuoteResponse> {
     task_type: quote.task_type_id,
     customer_price_usd: quote.quoted_price_usd,
     estimated_minutes: quote.estimated_minutes,
-    required_capability: taskType.required_capability,
+    required_capability: matchedCapability,
     expires_at: quote.expires_at,
     created_at: quote.created_at,
     agent_token: created.agent_token,

@@ -4,6 +4,7 @@ import { TASK_CATALOGUE } from "../lib/catalogue";
 import { TaskStatus, validateTransition } from "../lib/state-machine";
 import { generateToken, hashToken, verifyTokenHash } from "../lib/auth";
 import { ServiceError } from "../lib/errors";
+import { matchHumanCapability } from "../lib/matching";
 
 // Ensure environment variables (.env.local, .env, etc.) are loaded
 loadEnvConfig(process.cwd());
@@ -485,7 +486,13 @@ export const db = {
     };
 
     const taskType = await this.getTaskType(params.task_type_id);
-    const capability = taskType?.required_capability || "";
+    let capability = taskType?.required_capability || "";
+    if (params.task_type_id === "HUMAN_JUDGMENT_REQUEST") {
+      const match = matchHumanCapability(params.input_payload as any);
+      if (match.matched && match.capability_code) {
+        capability = match.capability_code;
+      }
+    }
     const qualifiedWorkers = await this.getWorkersByCapability(capability);
 
     const offers: Array<{ worker_id: string; worker_token: string; offer_id: string }> = [];
@@ -863,11 +870,18 @@ export const db = {
 
     // AUTHORIZATION (only after authentication): capability gate.
     const taskType = await this.getTaskType(task.task_type_id);
-    const hasCapability = await this.verifyWorkerCapability(workerId, taskType?.required_capability || "");
+    let capability = taskType?.required_capability || "";
+    if (task.task_type_id === "HUMAN_JUDGMENT_REQUEST") {
+      const match = matchHumanCapability(task.input_payload as any);
+      if (match.matched && match.capability_code) {
+        capability = match.capability_code;
+      }
+    }
+    const hasCapability = await this.verifyWorkerCapability(workerId, capability);
     if (!hasCapability) {
       return {
         success: false,
-        error: `Worker '${workerId}' does not possess the required verified capability: '${taskType?.required_capability}'`,
+        error: `Worker '${workerId}' does not possess the required verified capability: '${capability}'`,
         code: 403,
       };
     }

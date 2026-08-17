@@ -10,11 +10,13 @@ export type EventType =
   | "task_submitted"
   | "task_completed"
   | "task_failed"
-  | "result_retrieved";
+  | "result_retrieved"
+  | "demand_matched"
+  | "demand_unmatched";
 
 export async function logEvent(
   eventType: EventType,
-  entityType: "quote" | "task" | "task_result" | "worker",
+  entityType: "quote" | "task" | "task_result" | "worker" | "demand",
   entityId: string,
   payload: Record<string, unknown> = {}
 ) {

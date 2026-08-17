@@ -8,6 +8,7 @@ export const TaskTypeCode = z.enum([
   "AI_VIDEO_REVIEW",
   "SOFTWARE_PRODUCT_REVIEW",
   "AI_WORKFLOW_REVIEW",
+  "HUMAN_JUDGMENT_REQUEST",
 ]);
 
 export type TaskTypeCode = z.infer<typeof TaskTypeCode>;
@@ -55,6 +56,15 @@ export const AiWorkflowReviewInputSchema = z.object({
   steps: z.array(z.string().min(5)).min(1, "At least one workflow step is required"),
   failure_modes_considered: z.array(z.string()).default([]),
   expected_throughput: z.string().min(5, "Expected throughput / frequency is required"),
+});
+
+export const HumanJudgmentRequestInputSchema = z.object({
+  requested_outcome: z.string().min(15, "Requested outcome must be at least 15 characters"),
+  why_human_needed: z.string().min(15, "Reason why human is needed must be at least 15 characters"),
+  required_expertise: z.string().min(10, "Required expertise must be at least 10 characters"),
+  context: z.string().min(20, "Context must be at least 20 characters"),
+  urgency: z.string().optional(),
+  constraints: z.union([z.string(), z.array(z.string())]).optional(),
 });
 
 // Result schemas according to HUMAN_TASK_CATALOGUE.md and BUILD_SPEC.md
@@ -185,6 +195,23 @@ export const AiWorkflowReviewResultSchema = z.object({
     .max(1, "Confidence must be between 0.0 and 1.0"),
 });
 
+export const HumanJudgmentRequestResultSchema = z.object({
+  verdict: z.string().min(5, "Verdict must be at least 5 characters"),
+  findings: z
+    .array(z.string().min(15, "Each finding must be at least 15 characters"))
+    .min(1, "At least one finding is required"),
+  highest_impact_insight: z
+    .string()
+    .min(20, "Highest impact insight must be at least 20 characters"),
+  recommended_next_action: z
+    .string()
+    .min(20, "Recommended next action must be at least 20 characters"),
+  confidence: z
+    .number()
+    .min(0, "Confidence must be between 0.0 and 1.0")
+    .max(1, "Confidence must be between 0.0 and 1.0"),
+});
+
 // Helper to validate input payload based on task type
 export function validateTaskInput(taskType: string, payload: unknown) {
   switch (taskType) {
@@ -200,6 +227,8 @@ export function validateTaskInput(taskType: string, payload: unknown) {
       return SoftwareProductReviewInputSchema.safeParse(payload);
     case "AI_WORKFLOW_REVIEW":
       return AiWorkflowReviewInputSchema.safeParse(payload);
+    case "HUMAN_JUDGMENT_REQUEST":
+      return HumanJudgmentRequestInputSchema.safeParse(payload);
     default:
       return {
         success: false as const,
@@ -229,6 +258,8 @@ export function validateTaskResult(taskType: string, result: unknown) {
       return SoftwareProductReviewResultSchema.safeParse(result);
     case "AI_WORKFLOW_REVIEW":
       return AiWorkflowReviewResultSchema.safeParse(result);
+    case "HUMAN_JUDGMENT_REQUEST":
+      return HumanJudgmentRequestResultSchema.safeParse(result);
     default:
       return {
         success: false as const,

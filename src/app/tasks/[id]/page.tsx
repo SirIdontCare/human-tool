@@ -104,6 +104,13 @@ function WorkerTaskContent() {
   const [workflowHumanInTheLoop, setWorkflowHumanInTheLoop] = useState("");
   const [workflowOverallVerdict, setWorkflowOverallVerdict] = useState("");
 
+  // 7. Human Judgment Request (Open Demand)
+  const [judgmentVerdict, setJudgmentVerdict] = useState("");
+  const [judgmentFindings, setJudgmentFindings] = useState<string[]>([""]);
+  const [judgmentInsight, setJudgmentInsight] = useState("");
+  const [judgmentAction, setJudgmentAction] = useState("");
+  const [judgmentConfidence, setJudgmentConfidence] = useState(0.95);
+
   const fetchTask = useCallback(async () => {
     try {
       setLoading(true);
@@ -382,6 +389,33 @@ function WorkerTaskContent() {
           human_in_the_loop_assessment: workflowHumanInTheLoop.trim(),
           overall_verdict: workflowOverallVerdict.trim(),
           confidence: Number(landingConfidence),
+        };
+      } else if (task?.task_type === "HUMAN_JUDGMENT_REQUEST") {
+        if (!judgmentVerdict.trim() || judgmentVerdict.trim().length < 5) {
+          throw new Error("Verdict must be at least 5 characters.");
+        }
+        const filteredFindings = judgmentFindings.filter((f) => f.trim().length > 0);
+        if (filteredFindings.length === 0) {
+          throw new Error("At least one finding is required.");
+        }
+        for (let i = 0; i < filteredFindings.length; i++) {
+          if (filteredFindings[i].trim().length < 15) {
+            throw new Error(`Finding #${i + 1} must be at least 15 characters.`);
+          }
+        }
+        if (!judgmentInsight.trim() || judgmentInsight.trim().length < 20) {
+          throw new Error("Highest impact insight must be at least 20 characters.");
+        }
+        if (!judgmentAction.trim() || judgmentAction.trim().length < 20) {
+          throw new Error("Recommended next action must be at least 20 characters.");
+        }
+
+        resultPayload = {
+          verdict: judgmentVerdict.trim(),
+          findings: filteredFindings.map((f) => f.trim()),
+          highest_impact_insight: judgmentInsight.trim(),
+          recommended_next_action: judgmentAction.trim(),
+          confidence: Number(judgmentConfidence),
         };
       }
 
@@ -1413,6 +1447,110 @@ function WorkerTaskContent() {
                         required
                       />
                     </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 7. HUMAN_JUDGMENT_REQUEST */}
+              {task.task_type === "HUMAN_JUDGMENT_REQUEST" && (
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                      Human Verdict / Conclusion (min 5 chars)
+                    </label>
+                    <input
+                      type="text"
+                      value={judgmentVerdict}
+                      onChange={(e) => setJudgmentVerdict(e.target.value)}
+                      placeholder="e.g. APPROVED_WITH_SAFEGUARDS, REJECTED, FEASIBLE_WITH_CHANGES..."
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider">
+                        Key Findings & Observations (min 15 chars each)
+                      </label>
+                      <button
+                        type="button"
+                        onClick={() => setJudgmentFindings([...judgmentFindings, ""])}
+                        className="text-xs text-blue-400 hover:text-blue-300 font-medium"
+                      >
+                        + Add Finding
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {judgmentFindings.map((finding, idx) => (
+                        <div key={idx} className="flex space-x-2">
+                          <input
+                            type="text"
+                            value={finding}
+                            onChange={(e) => {
+                              const copy = [...judgmentFindings];
+                              copy[idx] = e.target.value;
+                              setJudgmentFindings(copy);
+                            }}
+                            placeholder={`Finding #${idx + 1} description and evidence...`}
+                            className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                            required
+                          />
+                          {judgmentFindings.length > 1 && (
+                            <button
+                              type="button"
+                              onClick={() => setJudgmentFindings(judgmentFindings.filter((_, i) => i !== idx))}
+                              className="px-3 bg-red-950/40 text-red-400 rounded-lg border border-red-900/50 hover:bg-red-900/40 text-xs"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                      Highest Impact Insight (min 20 chars)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={judgmentInsight}
+                      onChange={(e) => setJudgmentInsight(e.target.value)}
+                      placeholder="The single most crucial judgment or insight the AI agent should know..."
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                      Recommended Next Action (min 20 chars)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={judgmentAction}
+                      onChange={(e) => setJudgmentAction(e.target.value)}
+                      placeholder="Concrete action item the AI agent or system should execute next..."
+                      className="w-full bg-slate-950 border border-slate-700 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                      Confidence Score: {(judgmentConfidence * 100).toFixed(0)}%
+                    </label>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="1.0"
+                      step="0.01"
+                      value={judgmentConfidence}
+                      onChange={(e) => setJudgmentConfidence(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                    />
                   </div>
                 </div>
               )}

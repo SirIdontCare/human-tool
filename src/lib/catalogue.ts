@@ -210,6 +210,27 @@ export const RESULT_SCHEMAS: Record<string, Record<string, unknown>> = {
       "confidence",
     ],
   },
+  HUMAN_JUDGMENT_REQUEST: {
+    type: "object",
+    properties: {
+      verdict: { type: "string", minLength: 5 },
+      findings: {
+        type: "array",
+        minItems: 1,
+        items: { type: "string", minLength: 15 },
+      },
+      highest_impact_insight: { type: "string", minLength: 20 },
+      recommended_next_action: { type: "string", minLength: 20 },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+    },
+    required: [
+      "verdict",
+      "findings",
+      "highest_impact_insight",
+      "recommended_next_action",
+      "confidence",
+    ],
+  },
 };
 
 export interface TaskCatalogueItem {
@@ -336,6 +357,25 @@ export const TASK_CATALOGUE: Record<string, TaskCatalogueItem> = {
       ],
       failure_modes_considered: ["OCR parse failures on handwritten totals", "High webhook burst concurrency"],
       expected_throughput: "1,500 documents per day",
+    },
+  },
+  HUMAN_JUDGMENT_REQUEST: {
+    code: "HUMAN_JUDGMENT_REQUEST",
+    title: "Open Human Judgment & Expertise Request",
+    description: "General escape hatch for requesting capability-matched human judgment when predefined catalogue tasks do not fit.",
+    customer_price_usd: 39.0,
+    target_payout_usd: 25.0,
+    default_sla_minutes: 30,
+    required_capability: "HUMAN_JUDGMENT_REQUEST",
+    risk_level: "LOW",
+    mvp: true,
+    result_schema: RESULT_SCHEMAS.HUMAN_JUDGMENT_REQUEST,
+    example_input: {
+      requested_outcome: "Evaluate whether this AI-generated commercial video shot is client-ready or needs re-rendering.",
+      why_human_needed: "Automated vision models cannot reliably detect subtle uncanny-valley facial distortion and hand physics.",
+      required_expertise: "AI video generation quality assessment and commercial cinematography review.",
+      context: "Generated with Sora 2.0 for a B2B SaaS hero banner. Prompt: Futuristic drone camera moving through glass architecture.",
+      urgency: "standard",
     },
   },
 };

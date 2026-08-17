@@ -751,4 +751,83 @@ describe("Sprint 2 MCP Adapter Protocol Invariant Tests", () => {
       expect(task.status).toBe("OFFERED");
     }
   });
+
+  // Test 25: MCP Open Human Demand (HUMAN_JUDGMENT_REQUEST)
+  it("25. quote_human handles HUMAN_JUDGMENT_REQUEST matching and returns unavailable for unsupported expertise", async () => {
+    // A. Supported expertise request (AI video review)
+    const supportedRes = await client.callTool({
+      name: "quote_human",
+      arguments: {
+        task_type: "HUMAN_JUDGMENT_REQUEST",
+        input_payload: {
+          requested_outcome: "Assess whether this generative video shot has physics artifacts or is ready for broadcast.",
+          why_human_needed: "Automated vision models cannot reliably grade commercial cinematography aesthetics.",
+          required_expertise: "AI video generation quality assessment and commercial cinematography review.",
+          context: "Evaluating a 4-second Sora 2.0 establishing shot for a commercial ad campaign.",
+        },
+      },
+    });
+
+    expect(supportedRes.isError).toBeFalsy();
+    const supportedData = parseJsonContent<{
+      available: boolean;
+      quote_id: string;
+      task_type: string;
+      required_capability: string;
+      agent_token: string;
+    }>(supportedRes);
+
+    expect(supportedData.available).toBe(true);
+    expect(supportedData.task_type).toBe("HUMAN_JUDGMENT_REQUEST");
+    expect(supportedData.required_capability).toBe("AI_VIDEO_REVIEW");
+    expect(supportedData.agent_token).toBeDefined();
+
+    // call_human succeeds with supported quote token
+    const callRes = await client.callTool({
+      name: "call_human",
+      arguments: {
+        quote_id: supportedData.quote_id,
+        agent_token: supportedData.agent_token,
+      },
+    });
+    expect(callRes.isError).toBeFalsy();
+    const taskData = parseJsonContent<{ task_id: string; status: string }>(callRes);
+    expect(taskData.status).toBe("OFFERED");
+
+    // B. Unsupported expertise request (Securities lawyer)
+    const unsupportedRes = await client.callTool({
+      name: "quote_human",
+      arguments: {
+        task_type: "HUMAN_JUDGMENT_REQUEST",
+        input_payload: {
+          requested_outcome: "Review this investment convertible note as an experienced securities lawyer.",
+          why_human_needed: "Complex legal liability and SEC regulatory compliance requires bar-certified legal counsel.",
+          required_expertise: "Securities lawyer specialized in SEC compliance and venture debt.",
+          context: "Evaluating Series A convertible promissory note terms and investor covenant clauses.",
+        },
+      },
+    });
+
+    expect(unsupportedRes.isError).toBeFalsy();
+    const unsupportedData = parseJsonContent<{
+      available: boolean;
+      reason: string;
+      task_type: string;
+      agent_token?: string;
+    }>(unsupportedRes);
+
+    expect(unsupportedData.available).toBe(false);
+    expect(unsupportedData.reason).toBe("NO_MATCHING_HUMAN_CAPABILITY");
+    expect(unsupportedData.agent_token).toBeUndefined();
+
+    // Attempting call_human without a token fails with UNAUTHORIZED
+    const failedCall = await client.callTool({
+      name: "call_human",
+      arguments: {
+        quote_id: "quote_unsupported_test",
+        agent_token: "",
+      },
+    });
+    expect(failedCall.isError).toBe(true);
+  });
 });

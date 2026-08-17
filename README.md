@@ -42,6 +42,7 @@ AI Agent
 | `AI_VIDEO_REVIEW` | AI Video Review & Quality Assessment | $39.00 | $25.00 | 30 min | `LOW` | `verdict`, `top_issues` (3), `highest_impact_change`, assessments, `overall_verdict`, `confidence` |
 | `SOFTWARE_PRODUCT_REVIEW` | Software Product & Demo Review | $39.00 | $25.00 | 30 min | `LOW` | `verdict`, `top_issues` (3), `highest_impact_change`, assessments, `overall_verdict`, `confidence` |
 | `AI_WORKFLOW_REVIEW` | AI & Automation Workflow Review | $39.00 | $25.00 | 30 min | `LOW` | `verdict`, `top_issues` (3), `highest_impact_change`, assessments, `overall_verdict`, `confidence` |
+| `HUMAN_JUDGMENT_REQUEST` | Open Human Judgment & Expertise Request | $39.00 | $25.00 | 30 min | `LOW` | `verdict`, `findings`, `highest_impact_insight`, `recommended_next_action`, `confidence` |
 
 ---
 
@@ -208,9 +209,11 @@ AI Agent
 ### Available Tools
 
 #### 1. `quote_human`
-Request a deterministic quote and quote-scoped capability credential (`agent_token`) for capability-matched human work.
-- **Inputs:** `task_type` (`LANDING_PAGE_REVIEW` | `ARCHITECTURE_SANITY_CHECK` | `EXPERT_FACT_VERIFICATION` | `AI_VIDEO_REVIEW` | `SOFTWARE_PRODUCT_REVIEW` | `AI_WORKFLOW_REVIEW`), `input_payload` (object).
-- **Outputs:** `quote_id`, `task_type`, `customer_price_usd`, `estimated_minutes`, `expires_at`, `agent_token`, `required_capability`.
+Request a deterministic quote and quote-scoped capability credential (`agent_token`) for capability-matched human work. Prefer a specific catalogue task type when one fits; use `HUMAN_JUDGMENT_REQUEST` for open demand discovery.
+- **Inputs:** `task_type` (`LANDING_PAGE_REVIEW` | `ARCHITECTURE_SANITY_CHECK` | `EXPERT_FACT_VERIFICATION` | `AI_VIDEO_REVIEW` | `SOFTWARE_PRODUCT_REVIEW` | `AI_WORKFLOW_REVIEW` | `HUMAN_JUDGMENT_REQUEST`), `input_payload` (object).
+- **Outputs:**
+  - When available: `{ available: true, quote_id, task_type, customer_price_usd, estimated_minutes, expires_at, agent_token, required_capability }`
+  - When unavailable: `{ available: false, reason: "NO_MATCHING_HUMAN_CAPABILITY", task_type: "HUMAN_JUDGMENT_REQUEST", message: "..." }`
 
 #### 2. `call_human`
 Create and dispatch a task from an unexpired quote to capability-matched workers using the quote-scoped agent capability credential.

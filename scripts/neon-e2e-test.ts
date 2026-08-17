@@ -67,8 +67,8 @@ async function runFinalPreMCPNeonE2ETest() {
   console.log("\n[1/15] Verifying schema_migrations tracking in Neon...");
   const migRes = await rawPool.query("SELECT version, applied_at FROM schema_migrations ORDER BY version ASC");
   console.log("Applied migrations in Neon:", migRes.rows.map((r) => r.version));
-  if (migRes.rows.length < 7) {
-    throw new Error(`Expected at least 7 migrations in schema_migrations! Found: ${migRes.rows.length}`);
+  if (migRes.rows.length < 8) {
+    throw new Error(`Expected at least 8 migrations in schema_migrations! Found: ${migRes.rows.length}`);
   }
   if (!migRes.rows.some((r) => r.version.includes("004"))) {
     throw new Error("Migration 004 is missing from schema_migrations!");
@@ -82,7 +82,10 @@ async function runFinalPreMCPNeonE2ETest() {
   if (!migRes.rows.some((r) => r.version.includes("007"))) {
     throw new Error("Migration 007 is missing from schema_migrations!");
   }
-  console.log("✓ Migrations 004, 005, 006, and 007 applied");
+  if (!migRes.rows.some((r) => r.version.includes("008"))) {
+    throw new Error("Migration 008 is missing from schema_migrations!");
+  }
+  console.log("✓ Migrations 004, 005, 006, 007, and 008 applied");
 
   // ============================================================
   // [2/15] Schema invariants (005: quotes.agent_token_hash NOT NULL,
@@ -305,6 +308,16 @@ async function runFinalPreMCPNeonE2ETest() {
         human_in_the_loop_assessment: "Escalation threshold is too loose; tightening it will prevent automated financial errors.",
         overall_verdict: "Promising automation architecture that requires three concrete safety guardrails before production deployment.",
         confidence: 0.97,
+      },
+      HUMAN_JUDGMENT_REQUEST: {
+        verdict: "APPROVED_WITH_SAFEGUARDS",
+        findings: [
+          "Primary workflow architecture is solid and follows idempotency patterns.",
+          "Rate limits on third party LLM APIs should be guarded with backoff queues.",
+        ],
+        highest_impact_insight: "The human fallback queue prevents silent invoice data corruption under high load.",
+        recommended_next_action: "Deploy to staging cluster with automated error threshold alarms enabled.",
+        confidence: 0.96,
       },
     };
     const sample = sampleByCode[String(row.code)];

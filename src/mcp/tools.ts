@@ -53,9 +53,9 @@ export function registerHumanCapabilityTools(server: McpServer) {
   server.tool(
     "quote_human",
     "Request a deterministic quote and quote-scoped capability credential (agent_token) for capability-matched human work. " +
-      "Use when human judgment would materially improve reliability, AI confidence is insufficient, " +
-      "independent verification is valuable, or the task requires human capability the model cannot reliably provide. " +
-      "Supported task_types: LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, EXPERT_FACT_VERIFICATION, AI_VIDEO_REVIEW, SOFTWARE_PRODUCT_REVIEW, AI_WORKFLOW_REVIEW.",
+      "Prefer a specific catalogue task type when one accurately fits (LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, EXPERT_FACT_VERIFICATION, AI_VIDEO_REVIEW, SOFTWARE_PRODUCT_REVIEW, AI_WORKFLOW_REVIEW). " +
+      "Use HUMAN_JUDGMENT_REQUEST when human judgment would materially improve the outcome but none of the specific task types fits. " +
+      "Availability is NOT guaranteed: an unfulfillable HUMAN_JUDGMENT_REQUEST returns available: false and reason: NO_MATCHING_HUMAN_CAPABILITY.",
     {
       task_type: z
         .enum([
@@ -65,8 +65,9 @@ export function registerHumanCapabilityTools(server: McpServer) {
           "AI_VIDEO_REVIEW",
           "SOFTWARE_PRODUCT_REVIEW",
           "AI_WORKFLOW_REVIEW",
+          "HUMAN_JUDGMENT_REQUEST",
         ])
-        .describe("The canonical task type code from the catalogue: LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, EXPERT_FACT_VERIFICATION, AI_VIDEO_REVIEW, SOFTWARE_PRODUCT_REVIEW, or AI_WORKFLOW_REVIEW"),
+        .describe("The canonical task type code from the catalogue: LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, EXPERT_FACT_VERIFICATION, AI_VIDEO_REVIEW, SOFTWARE_PRODUCT_REVIEW, AI_WORKFLOW_REVIEW, or HUMAN_JUDGMENT_REQUEST"),
       input_payload: z
         .record(z.unknown())
         .describe("Structured input payload meeting the schema of the specified task_type"),
@@ -77,6 +78,26 @@ export function registerHumanCapabilityTools(server: McpServer) {
           task_type,
           input_payload,
         });
+
+        if (!quote.available) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    available: false,
+                    reason: quote.reason || "NO_MATCHING_HUMAN_CAPABILITY",
+                    task_type: quote.task_type,
+                    message: quote.message || "No verified human capability is currently active for the requested expertise.",
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
 
         // Safe agent-facing payload: quote metadata + raw capability credential
         const responseData = {

@@ -14,6 +14,13 @@ import { RESULT_SCHEMAS } from "../src/lib/catalogue";
 import { validateTaskResult } from "../src/lib/schemas";
 import { ServiceError } from "../src/lib/errors";
 
+function assertAvailable<T extends { available: boolean }>(
+  q: T
+): asserts q is T & { available: true; quote_id: string; agent_token: string } {
+  expect(q.available).toBe(true);
+  if (!q.available) throw new Error("Quote is not available");
+}
+
 describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
   beforeEach(() => {
     db.resetMemStore();
@@ -60,6 +67,7 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
         expected_scale: "10k rps",
       },
     });
+    assertAvailable(quoteRes);
 
     expect(quoteRes.agent_token).toMatch(/^atk_/);
     expect(quoteRes.agent_token.length).toBeGreaterThan(24);
@@ -102,6 +110,7 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
       task_type: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "Devs" },
     });
+    assertAvailable(quoteRes);
 
     // No token -> 401 UNAUTHORIZED
     await expect(createTaskFromQuote({ quote_id: quoteRes.quote_id })).rejects.toMatchObject({
@@ -128,6 +137,7 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
       task_type: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "B2B SaaS" },
     });
+    assertAvailable(quoteRes);
 
     const results = await Promise.all([
       createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", quoteRes.agent_token),
@@ -147,6 +157,7 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
       task_type: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "Devs" },
     });
+    assertAvailable(quoteRes);
 
     const taskRes1 = await createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", quoteRes.agent_token);
 
@@ -173,6 +184,7 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
       task_type: "LANDING_PAGE_REVIEW",
       input_payload: { url: "https://example.com", target_audience: "Devs" },
     });
+    assertAvailable(quoteRes);
     await createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", quoteRes.agent_token);
 
     const replays = await Promise.all([
@@ -796,6 +808,16 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
           overall_verdict: "Promising automation architecture that requires three concrete safety guardrails before production deployment.",
           confidence: 0.97,
         },
+        HUMAN_JUDGMENT_REQUEST: {
+          verdict: "APPROVED_WITH_SAFEGUARDS",
+          findings: [
+            "Primary workflow architecture is solid and follows idempotency patterns.",
+            "Rate limits on third party LLM APIs should be guarded with backoff queues.",
+          ],
+          highest_impact_insight: "The human fallback queue prevents silent invoice data corruption under high load.",
+          recommended_next_action: "Deploy to staging cluster with automated error threshold alarms enabled.",
+          confidence: 0.96,
+        },
       };
       const valid = validateTaskResult(code, validSamples[code]);
       expect(valid.success, `published-schema-valid payload rejected for ${code}`).toBe(true);
@@ -852,6 +874,11 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
         AI_WORKFLOW_REVIEW: [
           { verdict: "invalid_verdict", top_issues: [], confidence: 0.95 },
           { verdict: "production_ready", top_issues: [], confidence: 0.95 },
+        ],
+        HUMAN_JUDGMENT_REQUEST: [
+          { verdict: "bad", findings: [], confidence: 0.95 }, // verdict minLength 5 + findings minItems 1
+          { verdict: "Valid verdict", findings: ["Too short"], confidence: 0.95 }, // finding minLength 15
+          { verdict: "Valid verdict", findings: ["Sufficiently long finding description"], confidence: 1.5 }, // confidence > 1
         ],
       };
       for (const [i, sample] of (violationSamples[code] || []).entries()) {
@@ -943,6 +970,79 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
     expect(fetchedResult.status).toBe("COMPLETED");
     expect(fetchedResult.result.verdict).toBe("minor_revisions");
     expect(fetchedResult.result.top_issues).toHaveLength(3);
+  });
+
+  // 27. Open Human Demand (HUMAN_JUDGMENT_REQUEST) Capability Matching & Demand Recording
+  it("27. should handle HUMAN_JUDGMENT_REQUEST with deterministic capability matching and record unmatched demand", async () => {
+    // A. Supported expertise request (maps to AI_VIDEO_REVIEW founder capability)
+    const supportedQuote = await requestQuote({
+      task_type: "HUMAN_JUDGMENT_REQUEST",
+      input_payload: {
+        requested_outcome: "Determine whether the AI-generated video shot has temporal defects or is client-ready.",
+        why_human_needed: "Vision language models cannot reliably judge commercial video aesthetics and subtle artifacts.",
+        required_expertise: "AI video generation quality assessment and commercial cinematography review.",
+        context: "Evaluating a 4-second cinematic establishing shot rendered with Sora 2.0 for a marketing campaign.",
+      },
+    });
+
+    expect(supportedQuote.available).toBe(true);
+    expect(supportedQuote.required_capability).toBe("AI_VIDEO_REVIEW");
+    expect(supportedQuote.quote_id).toBeDefined();
+    expect(supportedQuote.agent_token).toBeDefined();
+
+    // Create task from supported quote
+    const taskRes = await createTaskFromQuote({ quote_id: supportedQuote.quote_id }, "", supportedQuote.agent_token);
+    expect(taskRes.task_type).toBe("HUMAN_JUDGMENT_REQUEST");
+
+    // Must be offered to founder who has AI_VIDEO_REVIEW
+    const offers = await db.getOffersForTask(taskRes.task_id);
+    expect(offers.some((o) => o.worker_id === "w_founder")).toBe(true);
+
+    const founderToken = (await db.issueWorkerOfferToken(taskRes.task_id, "w_founder")).token!;
+    await acceptTask(taskRes.task_id, { worker_id: "w_founder" }, founderToken);
+    await startTask(taskRes.task_id, { worker_id: "w_founder" }, founderToken);
+
+    const submitRes = await submitTaskResult(
+      taskRes.task_id,
+      {
+        worker_id: "w_founder",
+        result_payload: {
+          verdict: "CLIENT_READY_WITH_REVISIONS",
+          findings: [
+            "Hand anatomy remains stable during the first two seconds but shows minor smearing at second 3.",
+            "Lighting and color grading are fully consistent across the entire camera rotation.",
+          ],
+          highest_impact_insight: "Inpainting frames 60-80 will make this shot broadcast ready immediately.",
+          recommended_next_action: "Perform targeted frame inpainting on the right hand subject before client review.",
+          confidence: 0.95,
+        },
+      },
+      founderToken
+    );
+    expect(submitRes.status).toBe("COMPLETED");
+
+    // B. Unsupported expertise request (Securities lawyer) -> must NOT fabricate capability
+    const unsupportedQuote = await requestQuote({
+      task_type: "HUMAN_JUDGMENT_REQUEST",
+      input_payload: {
+        requested_outcome: "Review this convertible note investment contract as an experienced securities lawyer.",
+        why_human_needed: "Critical legal liability and regulatory compliance requires bar-certified legal counsel.",
+        required_expertise: "Securities lawyer specialized in SEC compliance and venture debt.",
+        context: "Evaluating Series A convertible promissory note terms and investor covenant clauses.",
+      },
+    });
+
+    expect(unsupportedQuote.available).toBe(false);
+    expect(unsupportedQuote.reason).toBe("NO_MATCHING_HUMAN_CAPABILITY");
+    expect(unsupportedQuote.agent_token).toBeUndefined();
+    expect(unsupportedQuote.quote_id).toBeUndefined();
+
+    // Verify unmatched demand event was recorded
+    const events = await db.getEvents();
+    const unmatchedEvent = events.find((e) => e.event_type === "demand_unmatched");
+    expect(unmatchedEvent).toBeDefined();
+    expect(String(unmatchedEvent?.payload.required_expertise).toLowerCase()).toContain("securities lawyer");
+    expect(unmatchedEvent?.payload.available).toBe(false);
   });
 });
 
