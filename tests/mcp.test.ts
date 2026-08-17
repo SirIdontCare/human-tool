@@ -161,6 +161,7 @@ describe("Sprint 2 MCP Adapter Protocol Invariant Tests", () => {
       quote_id: string;
       task_type: string;
       status: string;
+      human_status: string;
       customer_price_usd: number;
       is_existing: boolean;
     }>(callRes);
@@ -169,6 +170,7 @@ describe("Sprint 2 MCP Adapter Protocol Invariant Tests", () => {
     expect(task.quote_id).toBe(quote.quote_id);
     expect(task.task_type).toBe("LANDING_PAGE_REVIEW");
     expect(task.status).toBe("OFFERED");
+    expect(task.human_status).toBe("WAITING_FOR_ACCEPTANCE");
     expect(task.customer_price_usd).toBe(39.0);
     expect(task.is_existing).toBe(false);
   });
@@ -259,12 +261,14 @@ describe("Sprint 2 MCP Adapter Protocol Invariant Tests", () => {
     const resultData = parseJsonContent<{
       task_id: string;
       status: string;
+      human_status: string;
       is_ready: boolean;
       message: string;
     }>(resultRes);
 
     expect(resultData.task_id).toBe(task.task_id);
     expect(resultData.status).toBe("OFFERED");
+    expect(resultData.human_status).toBe("WAITING_FOR_ACCEPTANCE");
     expect(resultData.is_ready).toBe(false);
     expect(resultData.message).toContain("Task result is not ready");
   });
@@ -508,5 +512,171 @@ describe("Sprint 2 MCP Adapter Protocol Invariant Tests", () => {
     expect(rawText).not.toContain("stack");
     expect(rawText).not.toContain("DATABASE_URL");
     expect(rawText).not.toContain("INTERNAL_DEV_SECRET");
+  });
+
+  // Test 13: human_status reflects actual lifecycle progression without claiming worker is active prematurely
+  it("13. human_status accurately transitions OFFERED (WAITING_FOR_ACCEPTANCE) -> ACCEPTED (ACCEPTED_AWAITING_START) -> IN_PROGRESS -> COMPLETED", async () => {
+    const quoteRes = await client.callTool({
+      name: "quote_human",
+      arguments: {
+        task_type: "EXPERT_FACT_VERIFICATION",
+        input_payload: {
+          claim: "PostgreSQL 18 is the latest major release.",
+          context: "Database release verification",
+        },
+      },
+    });
+    const quote = parseJsonContent<{ quote_id: string; agent_token: string }>(quoteRes);
+
+    // 1. Initial creation -> OFFERED (WAITING_FOR_ACCEPTANCE)
+    const callRes = await client.callTool({
+      name: "call_human",
+      arguments: { quote_id: quote.quote_id, agent_token: quote.agent_token },
+    });
+    const task = parseJsonContent<{ task_id: string; status: string; human_status: string }>(callRes);
+    expect(task.status).toBe("OFFERED");
+    expect(task.human_status).toBe("WAITING_FOR_ACCEPTANCE");
+
+    // 2. Poll before accept -> OFFERED (WAITING_FOR_ACCEPTANCE)
+    const poll1 = await client.callTool({
+      name: "get_result",
+      arguments: { task_id: task.task_id, agent_token: quote.agent_token },
+    });
+    const poll1Data = parseJsonContent<{ status: string; human_status: string; is_ready: boolean }>(poll1);
+    expect(poll1Data.status).toBe("OFFERED");
+    expect(poll1Data.human_status).toBe("WAITING_FOR_ACCEPTANCE");
+    expect(poll1Data.is_ready).toBe(false);
+
+    // 3. Worker accepts -> ACCEPTED (ACCEPTED_AWAITING_START)
+    const offers = await db.getOffersForTask(task.task_id);
+    const workerId = offers[0].worker_id;
+    const workerToken = (await db.issueWorkerOfferToken(task.task_id, workerId)).token!;
+    await acceptTask(task.task_id, { worker_id: workerId }, workerToken);
+
+    const poll2 = await client.callTool({
+      name: "get_result",
+      arguments: { task_id: task.task_id, agent_token: quote.agent_token },
+    });
+    const poll2Data = parseJsonContent<{ status: string; human_status: string; is_ready: boolean }>(poll2);
+    expect(poll2Data.status).toBe("ACCEPTED");
+    expect(poll2Data.human_status).toBe("ACCEPTED_AWAITING_START");
+    expect(poll2Data.is_ready).toBe(false);
+
+    // 4. Worker starts -> IN_PROGRESS
+    await startTask(task.task_id, { worker_id: workerId }, workerToken);
+
+    const poll3 = await client.callTool({
+      name: "get_result",
+      arguments: { task_id: task.task_id, agent_token: quote.agent_token },
+    });
+    const poll3Data = parseJsonContent<{ status: string; human_status: string; is_ready: boolean }>(poll3);
+    expect(poll3Data.status).toBe("IN_PROGRESS");
+    expect(poll3Data.human_status).toBe("IN_PROGRESS");
+    expect(poll3Data.is_ready).toBe(false);
+  });
+
+  // Test 14: strengthened LANDING_PAGE_REVIEW structured result contract passes end-to-end
+  it("14. get_result returns verified 3-issue LANDING_PAGE_REVIEW structured contract with all assessments", async () => {
+    const quoteRes = await client.callTool({
+      name: "quote_human",
+      arguments: {
+        task_type: "LANDING_PAGE_REVIEW",
+        input_payload: {
+          url: "https://agentic-saas.example.com",
+          target_audience: "B2B SaaS Founders and Autonomous Agent Builders",
+        },
+      },
+    });
+    const quote = parseJsonContent<{ quote_id: string; agent_token: string }>(quoteRes);
+
+    const callRes = await client.callTool({
+      name: "call_human",
+      arguments: { quote_id: quote.quote_id, agent_token: quote.agent_token },
+    });
+    const task = parseJsonContent<{ task_id: string }>(callRes);
+
+    const offers = await db.getOffersForTask(task.task_id);
+    const workerId = offers[0].worker_id;
+    const workerToken = (await db.issueWorkerOfferToken(task.task_id, workerId)).token!;
+
+    await acceptTask(task.task_id, { worker_id: workerId }, workerToken);
+    await startTask(task.task_id, { worker_id: workerId }, workerToken);
+
+    const richLandingResult = {
+      top_issues: [
+        {
+          issue: "Value proposition headline is too vague for technical buyers",
+          evidence: "Observed header text 'AI Everything' does not explain product features or outcomes",
+          why_it_matters: "B2B decision makers bounce within 5 seconds without clear capability description",
+          recommended_change: "Rewrite hero headline to state concrete autonomous action workflow",
+          severity: "high" as const,
+        },
+        {
+          issue: "Social proof and security credentials are not visible above the fold",
+          evidence: "No enterprise customer logos or audited security badges appear in the initial viewport",
+          why_it_matters: "Enterprise security teams require immediate trust markers before approving pilot signups",
+          recommended_change: "Add audited compliance badges and enterprise logo marquee directly below CTA",
+          severity: "medium" as const,
+        },
+        {
+          issue: "Pricing CTA lacks transparent next-step guidance",
+          evidence: "Button reads 'Get Started' with no indication of trial terms or pricing tier",
+          why_it_matters: "Ambiguous CTA copy causes friction and hesitation at the conversion point",
+          recommended_change: "Change CTA to 'Start 14-Day Pilot' with subtext 'No credit card required'",
+          severity: "low" as const,
+        },
+      ],
+      highest_impact_change: {
+        change: "Embed an interactive live workflow simulation directly in the hero viewport",
+        rationale: "Prospective buyers convert 3x higher when they can interactively test the agent loop",
+        expected_effect: "Expected to increase visitor-to-pilot conversion rate by 35%",
+      },
+      trust_and_credibility_assessment: "Site uses HTTPS but currently lacks enterprise customer case studies, SOC2 badges, or verifiable customer metrics.",
+      cta_assessment: "Primary call to action is prominent but lacks clarity regarding trial requirements and onboarding time.",
+      us_market_fit_assessment: "Copy tone is appropriate for US tech sector but needs more concise outcome-oriented positioning rather than feature lists.",
+      visual_hierarchy_assessment: "Clean layout with legible typography, but secondary navigation buttons compete visually with the primary call to action.",
+      overall_verdict: "High technical potential with clear value that requires sharper positioning, immediate proof points, and friction-free CTA copy.",
+      confidence: 0.96,
+    };
+
+    await submitTaskResult(
+      task.task_id,
+      {
+        worker_id: workerId,
+        result_payload: richLandingResult,
+      },
+      workerToken
+    );
+
+    const resultRes = await client.callTool({
+      name: "get_result",
+      arguments: { task_id: task.task_id, agent_token: quote.agent_token },
+    });
+
+    expect(resultRes.isError).toBeFalsy();
+    const resultData = parseJsonContent<{
+      task_id: string;
+      task_type: string;
+      status: string;
+      human_status: string;
+      is_ready: boolean;
+      result: typeof richLandingResult;
+    }>(resultRes);
+
+    expect(resultData.task_id).toBe(task.task_id);
+    expect(resultData.task_type).toBe("LANDING_PAGE_REVIEW");
+    expect(resultData.status).toBe("COMPLETED");
+    expect(resultData.human_status).toBe("COMPLETED");
+    expect(resultData.is_ready).toBe(true);
+    expect(resultData.result.top_issues).toHaveLength(3);
+    expect(resultData.result.top_issues[0].issue).toBe(richLandingResult.top_issues[0].issue);
+    expect(resultData.result.top_issues[0].severity).toBe("high");
+    expect(resultData.result.highest_impact_change.change).toBe(richLandingResult.highest_impact_change.change);
+    expect(resultData.result.trust_and_credibility_assessment).toBeDefined();
+    expect(resultData.result.cta_assessment).toBeDefined();
+    expect(resultData.result.us_market_fit_assessment).toBeDefined();
+    expect(resultData.result.visual_hierarchy_assessment).toBeDefined();
+    expect(resultData.result.overall_verdict).toBeDefined();
+    expect(resultData.result.confidence).toBe(0.96);
   });
 });

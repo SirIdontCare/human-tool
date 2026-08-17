@@ -8,12 +8,48 @@ export const RESULT_SCHEMAS: Record<string, Record<string, unknown>> = {
   LANDING_PAGE_REVIEW: {
     type: "object",
     properties: {
-      top_issues: { type: "array", items: { type: "string", minLength: 1 }, minItems: 1 },
-      highest_impact_change: { type: "string", minLength: 5 },
-      conversion_blockers: { type: "array", items: { type: "string" } },
+      top_issues: {
+        type: "array",
+        minItems: 3,
+        maxItems: 3,
+        items: {
+          type: "object",
+          properties: {
+            issue: { type: "string", minLength: 10 },
+            evidence: { type: "string", minLength: 15 },
+            why_it_matters: { type: "string", minLength: 15 },
+            recommended_change: { type: "string", minLength: 15 },
+            severity: { type: "string", enum: ["high", "medium", "low"] },
+          },
+          required: ["issue", "evidence", "why_it_matters", "recommended_change", "severity"],
+        },
+      },
+      highest_impact_change: {
+        type: "object",
+        properties: {
+          change: { type: "string", minLength: 15 },
+          rationale: { type: "string", minLength: 20 },
+          expected_effect: { type: "string", minLength: 15 },
+        },
+        required: ["change", "rationale", "expected_effect"],
+      },
+      trust_and_credibility_assessment: { type: "string", minLength: 20 },
+      cta_assessment: { type: "string", minLength: 20 },
+      us_market_fit_assessment: { type: "string", minLength: 20 },
+      visual_hierarchy_assessment: { type: "string", minLength: 20 },
+      overall_verdict: { type: "string", minLength: 20 },
       confidence: { type: "number", minimum: 0, maximum: 1 },
     },
-    required: ["top_issues", "highest_impact_change", "confidence"],
+    required: [
+      "top_issues",
+      "highest_impact_change",
+      "trust_and_credibility_assessment",
+      "cta_assessment",
+      "us_market_fit_assessment",
+      "visual_hierarchy_assessment",
+      "overall_verdict",
+      "confidence",
+    ],
   },
   ARCHITECTURE_SANITY_CHECK: {
     type: "object",

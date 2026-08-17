@@ -52,8 +52,8 @@ export function registerHumanCapabilityTools(server: McpServer) {
   // TOOL 1: quote_human
   server.tool(
     "quote_human",
-    "Request a deterministic quote and quote-scoped capability credential (agent_token) for qualified human work. " +
-      "Use when qualified human judgment would materially improve reliability, AI confidence is insufficient, " +
+    "Request a deterministic quote and quote-scoped capability credential (agent_token) for capability-matched human work. " +
+      "Use when human judgment would materially improve reliability, AI confidence is insufficient, " +
       "independent verification is valuable, or the task requires human capability the model cannot reliably provide. " +
       "Supported task_types: LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, EXPERT_FACT_VERIFICATION.",
     {
@@ -105,9 +105,10 @@ export function registerHumanCapabilityTools(server: McpServer) {
   // TOOL 2: call_human
   server.tool(
     "call_human",
-    "Create and dispatch a verified human task from an unexpired quote using the quote-scoped agent capability credential. " +
-      "Qualified human workers matching the required capability will be offered the task. " +
-      "Returns the created task ID and status. Calling with an identical quote_id and valid agent_token is idempotent.",
+    "Create and dispatch a task from an unexpired quote using the quote-scoped agent capability credential. " +
+      "capability-matched human workers matching the required capability will be offered the task. " +
+      "Status Semantics: The initial status is OFFERED (human_status: 'WAITING_FOR_ACCEPTANCE'), meaning the task is created and dispatched to the worker queue; " +
+      "no human worker has accepted or started work yet. Returns the created task ID, status, and human_status. Calling with an identical quote_id and valid agent_token is idempotent.",
     {
       quote_id: z
         .string()
@@ -122,12 +123,24 @@ export function registerHumanCapabilityTools(server: McpServer) {
       try {
         const task = await createTaskFromQuote({ quote_id }, "", agent_token);
 
+        const humanStatus =
+          task.status === "OFFERED"
+            ? "WAITING_FOR_ACCEPTANCE"
+            : task.status === "ACCEPTED"
+            ? "ACCEPTED_AWAITING_START"
+            : task.status === "IN_PROGRESS"
+            ? "IN_PROGRESS"
+            : task.status === "COMPLETED"
+            ? "COMPLETED"
+            : task.status;
+
         // Safe agent-facing payload: strictly no worker credentials or internal margins
         const responseData = {
           task_id: task.task_id,
           quote_id: task.quote_id,
           task_type: task.task_type,
           status: task.status,
+          human_status: humanStatus,
           customer_price_usd: task.customer_price_usd,
           estimated_minutes: task.estimated_minutes,
           is_existing: Boolean(task.is_existing),
@@ -151,10 +164,11 @@ export function registerHumanCapabilityTools(server: McpServer) {
   // TOOL 3: get_result
   server.tool(
     "get_result",
-    "Check progress and retrieve the verified structured human outcome for a task. " +
-      "Requires the agent_token capability credential. If the task is still in progress (OFFERED, ACCEPTED, IN_PROGRESS), " +
-      "returns a structured not-ready state with current progress so the agent can reason about next steps. " +
-      "If COMPLETED, returns the verified structured result payload.",
+    "Check progress and retrieve the structured human outcome for a task. " +
+      "Requires the agent_token capability credential. If the task is not yet completed (OFFERED: waiting for worker acceptance; " +
+      "ACCEPTED: worker accepted, awaiting start; IN_PROGRESS: worker currently reviewing), returns a structured not-ready state with " +
+      "current status and human_status ('WAITING_FOR_ACCEPTANCE' | 'ACCEPTED_AWAITING_START' | 'IN_PROGRESS') so the agent can reason about progress. " +
+      "If COMPLETED, returns the structured verified outcome payload.",
     {
       task_id: z
         .string()
@@ -173,6 +187,7 @@ export function registerHumanCapabilityTools(server: McpServer) {
           task_id: result.task_id,
           task_type: result.task_type,
           status: result.status,
+          human_status: "COMPLETED",
           is_ready: true,
           result: result.result,
           submitted_at: result.submitted_at,
@@ -192,6 +207,15 @@ export function registerHumanCapabilityTools(server: McpServer) {
           // If the task is not completed yet, return a structured machine-usable
           // not-ready state (NOT an MCP error/crash) so the agent can reason.
           const taskStatus = (err.details as any)?.status || "IN_PROGRESS";
+          const humanStatus =
+            taskStatus === "OFFERED"
+              ? "WAITING_FOR_ACCEPTANCE"
+              : taskStatus === "ACCEPTED"
+              ? "ACCEPTED_AWAITING_START"
+              : taskStatus === "IN_PROGRESS"
+              ? "IN_PROGRESS"
+              : taskStatus;
+
           return {
             isError: false,
             content: [
@@ -201,6 +225,7 @@ export function registerHumanCapabilityTools(server: McpServer) {
                   {
                     task_id,
                     status: taskStatus,
+                    human_status: humanStatus,
                     is_ready: false,
                     message: err.message,
                   },

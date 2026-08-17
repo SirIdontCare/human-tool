@@ -643,8 +643,39 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
       // Schema-valid samples MUST pass the real submission validator
       const validSamples: Record<string, Record<string, unknown>> = {
         LANDING_PAGE_REVIEW: {
-          top_issues: ["Hero value prop unclear"],
-          highest_impact_change: "Add quickstart above the fold",
+          top_issues: [
+            {
+              issue: "Hero headline lacks clear value proposition",
+              evidence: "Headline text 'We build things' does not explain product features or benefits",
+              why_it_matters: "Visitors bounce within 5 seconds without understanding what the tool does",
+              recommended_change: "Rewrite headline to focus on verifiable capability outcomes and time saved",
+              severity: "high",
+            },
+            {
+              issue: "Missing social proof and credibility markers",
+              evidence: "No customer logos, security badges, or customer quotes appear above fold",
+              why_it_matters: "Enterprise decision makers need trust verification before evaluating deeper",
+              recommended_change: "Add enterprise customer logo marquee directly under the primary CTA",
+              severity: "medium",
+            },
+            {
+              issue: "Primary CTA button copy is ambiguous",
+              evidence: "Button reads 'Click here' instead of indicating transparent action",
+              why_it_matters: "Unclear next step increases friction and reduces click-through conversion",
+              recommended_change: "Change CTA label to 'Start Free Trial' with subtext 'No card needed'",
+              severity: "low",
+            },
+          ],
+          highest_impact_change: {
+            change: "Implement an interactive live workflow demo above the fold",
+            rationale: "Prospective buyers need immediate verification of autonomous capability before signup",
+            expected_effect: "Expected to increase visitor-to-demo conversion rate by 25-40%",
+          },
+          trust_and_credibility_assessment: "Current page has standard SSL but lacks enterprise trust badges, verifiable security certifications, or audited testimonials.",
+          cta_assessment: "Primary call to action is placed above fold but copy lacks urgency and transparent expectations.",
+          us_market_fit_assessment: "Copywriting tone is generally appropriate for US tech sector but lacks crisp concise positioning required by B2B buyers.",
+          visual_hierarchy_assessment: "Typography scale is good but hero section is cluttered with competing secondary buttons and distracting background gradients.",
+          overall_verdict: "Promising product with high technical value that suffers from generic positioning and insufficient proof points.",
           confidence: 0.95,
         },
         ARCHITECTURE_SANITY_CHECK: {
@@ -666,10 +697,30 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
       const props = schema.properties as Record<string, any>;
       const violationSamples: Record<string, Record<string, unknown>[]> = {
         LANDING_PAGE_REVIEW: [
-          { top_issues: [], highest_impact_change: "Add quickstart above the fold", confidence: 0.95 }, // minItems 1
-          { top_issues: [""], highest_impact_change: "Add quickstart above the fold", confidence: 0.95 }, // item minLength 1
-          { top_issues: ["Issue"], highest_impact_change: "ab", confidence: 0.95 }, // minLength 5
-          { top_issues: ["Issue"], highest_impact_change: "Add quickstart above the fold", confidence: 1.5 }, // maximum 1
+          { top_issues: [], confidence: 0.95 }, // minItems 3 / missing fields
+          {
+            top_issues: [
+              { issue: "Too short", evidence: "Short evidence", why_it_matters: "Short why", recommended_change: "Short rec", severity: "high" },
+              { issue: "Too short", evidence: "Short evidence", why_it_matters: "Short why", recommended_change: "Short rec", severity: "high" },
+              { issue: "Too short", evidence: "Short evidence", why_it_matters: "Short why", recommended_change: "Short rec", severity: "high" },
+            ],
+            confidence: 0.95,
+          }, // minLength violations & missing highest_impact_change
+          {
+            top_issues: [
+              { issue: "Issue description one", evidence: "Evidence description one", why_it_matters: "Why it matters one", recommended_change: "Recommended change one", severity: "invalid_severity" },
+              { issue: "Issue description two", evidence: "Evidence description two", why_it_matters: "Why it matters two", recommended_change: "Recommended change two", severity: "medium" },
+              { issue: "Issue description three", evidence: "Evidence description three", why_it_matters: "Why it matters three", recommended_change: "Recommended change three", severity: "low" },
+            ],
+            confidence: 0.95,
+          }, // enum violation on severity
+          {
+            top_issues: [
+              { issue: "Issue description one", evidence: "Evidence description one", why_it_matters: "Why it matters one", recommended_change: "Recommended change one", severity: "high" },
+              { issue: "Issue description two", evidence: "Evidence description two", why_it_matters: "Why it matters two", recommended_change: "Recommended change two", severity: "medium" },
+            ],
+            confidence: 0.95,
+          }, // exactly 3 required (2 provided)
         ],
         ARCHITECTURE_SANITY_CHECK: [
           { verdict: "unacceptable", recommended_changes: ["Use a transaction pooler"], confidence: 0.9 }, // enum

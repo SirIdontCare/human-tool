@@ -34,11 +34,44 @@ export const ExpertFactVerificationInputSchema = z.object({
 });
 
 // Result schemas according to HUMAN_TASK_CATALOGUE.md and BUILD_SPEC.md
+export const LandingPageIssueSchema = z.object({
+  issue: z.string().min(10, "Issue description must be at least 10 characters"),
+  evidence: z.string().min(15, "Evidence must be at least 15 characters"),
+  why_it_matters: z.string().min(15, "Why it matters must be at least 15 characters"),
+  recommended_change: z.string().min(15, "Recommended change must be at least 15 characters"),
+  severity: z.enum(["high", "medium", "low"]),
+});
+
+export const LandingPageHighestImpactChangeSchema = z.object({
+  change: z.string().min(15, "Highest impact change must be at least 15 characters"),
+  rationale: z.string().min(20, "Rationale must be at least 20 characters"),
+  expected_effect: z.string().min(15, "Expected effect must be at least 15 characters"),
+});
+
 export const LandingPageReviewResultSchema = z.object({
-  top_issues: z.array(z.string().min(1)).min(1, "At least one top issue must be provided"),
-  highest_impact_change: z.string().min(5, "Highest impact change must be specified"),
-  conversion_blockers: z.array(z.string()).default([]),
-  confidence: z.number().min(0).max(1, "Confidence must be between 0.0 and 1.0"),
+  top_issues: z
+    .array(LandingPageIssueSchema)
+    .length(3, "Exactly 3 top issues are required"),
+  highest_impact_change: LandingPageHighestImpactChangeSchema,
+  trust_and_credibility_assessment: z
+    .string()
+    .min(20, "Trust and credibility assessment must be at least 20 characters"),
+  cta_assessment: z
+    .string()
+    .min(20, "CTA assessment must be at least 20 characters"),
+  us_market_fit_assessment: z
+    .string()
+    .min(20, "US market fit assessment must be at least 20 characters"),
+  visual_hierarchy_assessment: z
+    .string()
+    .min(20, "Visual hierarchy assessment must be at least 20 characters"),
+  overall_verdict: z
+    .string()
+    .min(20, "Overall verdict must be at least 20 characters"),
+  confidence: z
+    .number()
+    .min(0, "Confidence must be between 0.0 and 1.0")
+    .max(1, "Confidence must be between 0.0 and 1.0"),
 });
 
 export const ArchitectureSanityCheckResultSchema = z.object({

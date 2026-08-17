@@ -147,8 +147,39 @@ describe("Sprint 1.1 Thin API Route Transport & Stable Error Code Invariants", (
       workerId: "w_alex_ux",
       workerToken: alexToken,
       resultPayload: {
-        top_issues: ["Issue 1"],
-        highest_impact_change: "Change 1",
+        top_issues: [
+          {
+            issue: "Hero headline lacks clear value proposition",
+            evidence: "Headline text 'We build things' does not explain product features or benefits",
+            why_it_matters: "Visitors bounce within 5 seconds without understanding what the tool does",
+            recommended_change: "Rewrite headline to focus on verifiable capability outcomes and time saved",
+            severity: "high",
+          },
+          {
+            issue: "Missing social proof and credibility markers",
+            evidence: "No customer logos, security badges, or customer quotes appear above fold",
+            why_it_matters: "Enterprise decision makers need trust verification before evaluating deeper",
+            recommended_change: "Add enterprise customer logo marquee directly under the primary CTA",
+            severity: "medium",
+          },
+          {
+            issue: "Primary CTA button copy is ambiguous",
+            evidence: "Button reads 'Click here' instead of indicating transparent action",
+            why_it_matters: "Unclear next step increases friction and reduces click-through conversion",
+            recommended_change: "Change CTA label to 'Start Free Trial' with subtext 'No card needed'",
+            severity: "low",
+          },
+        ],
+        highest_impact_change: {
+          change: "Implement an interactive live workflow demo above the fold",
+          rationale: "Prospective buyers need immediate verification of autonomous capability before signup",
+          expected_effect: "Expected to increase visitor-to-demo conversion rate by 25-40%",
+        },
+        trust_and_credibility_assessment: "Current page has standard SSL but lacks enterprise trust badges, verifiable security certifications, or audited testimonials.",
+        cta_assessment: "Primary call to action is placed above fold but copy lacks urgency and transparent expectations.",
+        us_market_fit_assessment: "Copywriting tone is generally appropriate for US tech sector but lacks crisp concise positioning required by B2B buyers.",
+        visual_hierarchy_assessment: "Typography scale is good but hero section is cluttered with competing secondary buttons and distracting background gradients.",
+        overall_verdict: "Promising product with high technical value that suffers from generic positioning and insufficient proof points.",
         confidence: 0.95,
       },
     });

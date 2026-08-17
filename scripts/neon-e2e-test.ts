@@ -67,8 +67,8 @@ async function runFinalPreMCPNeonE2ETest() {
   console.log("\n[1/15] Verifying schema_migrations tracking in Neon...");
   const migRes = await rawPool.query("SELECT version, applied_at FROM schema_migrations ORDER BY version ASC");
   console.log("Applied migrations in Neon:", migRes.rows.map((r) => r.version));
-  if (migRes.rows.length < 5) {
-    throw new Error(`Expected at least 5 migrations in schema_migrations! Found: ${migRes.rows.length}`);
+  if (migRes.rows.length < 6) {
+    throw new Error(`Expected at least 6 migrations in schema_migrations! Found: ${migRes.rows.length}`);
   }
   if (!migRes.rows.some((r) => r.version.includes("004"))) {
     throw new Error("Migration 004 is missing from schema_migrations!");
@@ -76,7 +76,10 @@ async function runFinalPreMCPNeonE2ETest() {
   if (!migRes.rows.some((r) => r.version.includes("005"))) {
     throw new Error("Migration 005 is missing from schema_migrations!");
   }
-  console.log("✓ Migrations 004 and 005 applied");
+  if (!migRes.rows.some((r) => r.version.includes("006"))) {
+    throw new Error("Migration 006 is missing from schema_migrations!");
+  }
+  console.log("✓ Migrations 004, 005, and 006 applied");
 
   // ============================================================
   // [2/15] Schema invariants (005: quotes.agent_token_hash NOT NULL,
@@ -147,8 +150,39 @@ async function runFinalPreMCPNeonE2ETest() {
     // Every published-schema-valid payload must pass the real submission validator.
     const sampleByCode: Record<string, Record<string, unknown>> = {
       LANDING_PAGE_REVIEW: {
-        top_issues: ["Hero value prop unclear"],
-        highest_impact_change: "Add quickstart above the fold",
+        top_issues: [
+          {
+            issue: "Hero headline lacks clear value proposition",
+            evidence: "Headline text 'We build things' does not explain product features or benefits",
+            why_it_matters: "Visitors bounce within 5 seconds without understanding what the tool does",
+            recommended_change: "Rewrite headline to focus on verifiable capability outcomes and time saved",
+            severity: "high",
+          },
+          {
+            issue: "Missing social proof and credibility markers",
+            evidence: "No customer logos, security badges, or customer quotes appear above fold",
+            why_it_matters: "Enterprise decision makers need trust verification before evaluating deeper",
+            recommended_change: "Add enterprise customer logo marquee directly under the primary CTA",
+            severity: "medium",
+          },
+          {
+            issue: "Primary CTA button copy is ambiguous",
+            evidence: "Button reads 'Click here' instead of indicating transparent action",
+            why_it_matters: "Unclear next step increases friction and reduces click-through conversion",
+            recommended_change: "Change CTA label to 'Start Free Trial' with subtext 'No card needed'",
+            severity: "low",
+          },
+        ],
+        highest_impact_change: {
+          change: "Implement an interactive live workflow demo above the fold",
+          rationale: "Prospective buyers need immediate verification of autonomous capability before signup",
+          expected_effect: "Expected to increase visitor-to-demo conversion rate by 25-40%",
+        },
+        trust_and_credibility_assessment: "Current page has standard SSL but lacks enterprise trust badges, verifiable security certifications, or audited testimonials.",
+        cta_assessment: "Primary call to action is placed above fold but copy lacks urgency and transparent expectations.",
+        us_market_fit_assessment: "Copywriting tone is generally appropriate for US tech sector but lacks crisp concise positioning required by B2B buyers.",
+        visual_hierarchy_assessment: "Typography scale is good but hero section is cluttered with competing secondary buttons and distracting background gradients.",
+        overall_verdict: "Promising product with high technical value that suffers from generic positioning and insufficient proof points.",
         confidence: 0.95,
       },
       ARCHITECTURE_SANITY_CHECK: {

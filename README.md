@@ -205,21 +205,22 @@ AI Agent
 ### Available Tools
 
 #### 1. `quote_human`
-Request a deterministic quote and quote-scoped capability credential (`agent_token`) for qualified human work.
+Request a deterministic quote and quote-scoped capability credential (`agent_token`) for capability-matched human work.
 - **Inputs:** `task_type` (`LANDING_PAGE_REVIEW` | `ARCHITECTURE_SANITY_CHECK` | `EXPERT_FACT_VERIFICATION`), `input_payload` (object).
 - **Outputs:** `quote_id`, `task_type`, `customer_price_usd`, `estimated_minutes`, `expires_at`, `agent_token`, `required_capability`.
 
 #### 2. `call_human`
-Create and dispatch a verified human task from an unexpired quote using the quote-scoped agent capability credential.
+Create and dispatch a task from an unexpired quote to capability-matched workers using the quote-scoped agent capability credential.
 - **Inputs:** `quote_id` (string), `agent_token` (string).
-- **Outputs:** `task_id`, `quote_id`, `task_type`, `status`, `customer_price_usd`, `estimated_minutes`, `is_existing`, `created_at`.
+- **Outputs:** `task_id`, `quote_id`, `task_type`, `status` (`OFFERED`), `human_status` (`WAITING_FOR_ACCEPTANCE`), `customer_price_usd`, `estimated_minutes`, `is_existing`, `created_at`.
+- *Note:* `OFFERED` status indicates the task has been dispatched to the worker queue; no human worker has accepted or started work yet.
 
 #### 3. `get_result`
-Check progress and retrieve the verified structured human outcome for a task.
+Check progress and retrieve the structured human outcome for a task.
 - **Inputs:** `task_id` (string), `agent_token` (string).
 - **Outputs:**
-  - When in progress: `{ task_id, status: "IN_PROGRESS", is_ready: false, message: "..." }`
-  - When completed: `{ task_id, task_type, status: "COMPLETED", is_ready: true, result: { ... }, submitted_at, accepted_at }`
+  - When in progress: `{ task_id, status: "OFFERED" | "ACCEPTED" | "IN_PROGRESS", human_status: "WAITING_FOR_ACCEPTANCE" | "ACCEPTED_AWAITING_START" | "IN_PROGRESS", is_ready: false, message: "..." }`
+  - When completed: `{ task_id, task_type, status: "COMPLETED", human_status: "COMPLETED", is_ready: true, result: { ... }, submitted_at, accepted_at }`
 
 ### Example MCP Client Configuration
 
