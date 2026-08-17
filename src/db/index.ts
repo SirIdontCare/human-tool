@@ -175,6 +175,21 @@ class InMemoryStore {
 // Global in-memory singleton
 const memStore = new InMemoryStore();
 
+// Build an event row and attach a timestamp (used inside transactional paths)
+function makeEventRow(
+  event: { eventType: string; entityType: string; entityId: string; payload?: Record<string, unknown> },
+  now: string
+): EventRow {
+  return {
+    id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+    event_type: event.eventType,
+    entity_type: event.entityType,
+    entity_id: event.entityId,
+    payload: { ...(event.payload || {}), timestamp: now },
+    created_at: now,
+  };
+}
+
 // Neon / PostgreSQL Pool (Serverless-Safe Configuration with Validated SSL)
 let pgPool: Pool | null = null;
 
@@ -390,12 +405,14 @@ export const db = {
     const pool = getPgPool();
     const now = new Date().toISOString();
 
-    // Check for existing task for idempotent return
+    // Check for existing task for idempotent return (a replay must not strand the agent:
+    // atomically rotate the agent token so the caller can authenticate to the existing task)
     const existing = await this.getTaskByQuoteId(params.quote_id);
     if (existing) {
+      const rotatedAgentToken = await this.rotateAgentToken(existing.id);
       return {
         task: existing,
-        agent_token: "",
+        agent_token: rotatedAgentToken || "",
         offers: [],
         is_existing: true,
       };
@@ -446,11 +463,27 @@ export const db = {
         );
 
         if (taskInsert.rows.length === 0) {
-          await client.query("ROLLBACK");
-          const conflictTask = await this.getTaskByQuoteId(params.quote_id);
+          // Idempotent replay: rotate the agent token inside the SAME transaction so
+          // the replaying agent receives a usable credential for the existing task.
+          const rotatedAgentToken = generateToken("atk");
+          const rotatedRes = await client.query(
+            `UPDATE tasks SET agent_token_hash = $1, updated_at = $2 WHERE quote_id = $3 RETURNING *`,
+            [hashToken(rotatedAgentToken), now, params.quote_id]
+          );
+          if (rotatedRes.rows.length === 0) {
+            await client.query("ROLLBACK");
+            const conflictTask = await this.getTaskByQuoteId(params.quote_id);
+            return {
+              task: conflictTask!,
+              agent_token: "",
+              offers: [],
+              is_existing: true,
+            };
+          }
+          await client.query("COMMIT");
           return {
-            task: conflictTask!,
-            agent_token: "",
+            task: rotatedRes.rows[0],
+            agent_token: rotatedAgentToken,
             offers: [],
             is_existing: true,
           };
@@ -482,7 +515,8 @@ export const db = {
     } else {
       if (memStore.tasks.has(taskRow.id) || Array.from(memStore.tasks.values()).some((t) => t.quote_id === taskRow.quote_id)) {
         const conflictTask = Array.from(memStore.tasks.values()).find((t) => t.quote_id === taskRow.quote_id);
-        return { task: conflictTask!, agent_token: "", offers: [], is_existing: true };
+        const rotatedAgentToken = conflictTask ? await this.rotateAgentToken(conflictTask.id) : null;
+        return { task: conflictTask!, agent_token: rotatedAgentToken || "", offers: [], is_existing: true };
       }
 
       memStore.tasks.set(taskRow.id, taskRow);
@@ -529,6 +563,45 @@ export const db = {
     return verifyTokenHash(agentToken, task.agent_token_hash);
   },
 
+  // Rotate the agent task token: generates a new opaque token, stores only its
+  // hash, and returns the raw token to the caller. Previous tokens are revoked.
+  async rotateAgentToken(taskId: string): Promise<string | null> {
+    checkProductionDbSafety();
+    const token = generateToken("atk");
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(
+        `UPDATE tasks SET agent_token_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id`,
+        [hashToken(token), taskId]
+      );
+      return res.rows.length > 0 ? token : null;
+    }
+    const task = memStore.tasks.get(taskId);
+    if (!task) return null;
+    task.agent_token_hash = hashToken(token);
+    task.updated_at = new Date().toISOString();
+    return token;
+  },
+
+  // Ops/test seam: set the stored agent token hash directly (used to repair or
+  // revoke access; a NULL/empty value makes the task fail closed with 401).
+  async setAgentTokenHash(taskId: string, tokenHash: string | null): Promise<boolean> {
+    checkProductionDbSafety();
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(
+        `UPDATE tasks SET agent_token_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id`,
+        [tokenHash, taskId]
+      );
+      return res.rows.length > 0;
+    }
+    const task = memStore.tasks.get(taskId);
+    if (!task) return false;
+    task.agent_token_hash = tokenHash || "";
+    task.updated_at = new Date().toISOString();
+    return true;
+  },
+
   async verifyWorkerToken(taskId: string, workerId: string, workerToken: string): Promise<boolean> {
     checkProductionDbSafety();
     if (!workerToken) return false;
@@ -547,6 +620,49 @@ export const db = {
     return verifyTokenHash(workerToken, offer.worker_token_hash);
   },
 
+  // Resolve a worker's identity from an opaque per-offer worker token alone.
+  async getWorkerIdByOfferToken(taskId: string, workerToken: string): Promise<string | null> {
+    checkProductionDbSafety();
+    if (!workerToken) return null;
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(
+        `SELECT worker_id, worker_token_hash FROM task_offers WHERE task_id = $1`,
+        [taskId]
+      );
+      for (const row of res.rows) {
+        if (verifyTokenHash(workerToken, row.worker_token_hash)) return row.worker_id;
+      }
+      return null;
+    }
+    const offers = Array.from(memStore.taskOffers.values()).filter((o) => o.task_id === taskId);
+    for (const offer of offers) {
+      if (verifyTokenHash(workerToken, offer.worker_token_hash)) return offer.worker_id;
+    }
+    return null;
+  },
+
+  // Rotate a worker offer token: generates a fresh opaque credential, stores
+  // only its hash, and returns the raw token. Only reachable through the
+  // internal worker-delivery channel. Previously delivered tokens are revoked.
+  async rotateWorkerOfferToken(taskId: string, workerId: string): Promise<string | null> {
+    checkProductionDbSafety();
+    const token = generateToken("otk");
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(
+        `UPDATE task_offers SET worker_token_hash = $1 WHERE task_id = $2 AND worker_id = $3 RETURNING id`,
+        [hashToken(token), taskId, workerId]
+      );
+      return res.rows.length > 0 ? token : null;
+    }
+    const offer = memStore.taskOffers.get(`${taskId}_${workerId}`) ||
+                  Array.from(memStore.taskOffers.values()).find((o) => o.task_id === taskId && o.worker_id === workerId);
+    if (!offer) return null;
+    offer.worker_token_hash = hashToken(token);
+    return token;
+  },
+
   async getOffersForTask(taskId: string): Promise<TaskOfferRow[]> {
     checkProductionDbSafety();
     const pool = getPgPool();
@@ -557,21 +673,26 @@ export const db = {
     return Array.from(memStore.taskOffers.values()).filter((o) => o.task_id === taskId);
   },
 
-  // Task Acceptance (Atomic with Capability and Token Auth)
+  // Task Acceptance (Atomic Single Transaction: verify token -> capability -> claim -> mark offer -> event)
   async acceptTask(
     taskId: string,
     workerId: string,
-    workerToken?: string
+    workerToken?: string,
+    event?: { eventType: string; entityType: string; entityId: string; payload?: Record<string, unknown> }
   ): Promise<{ success: boolean; task?: TaskRow; error?: string; code?: number }> {
     checkProductionDbSafety();
     const pool = getPgPool();
     const now = new Date().toISOString();
 
+    // Task existence check first
     const task = await this.getTask(taskId);
     if (!task) {
       return { success: false, error: `Task '${taskId}' not found`, code: 404 };
     }
 
+    // Capability gate: an incapable worker must receive WORKER_CAPABILITY_REQUIRED (403).
+    // This is reachable even without a credential because offers only exist for
+    // capability-qualified workers; the token below remains mandatory to claim.
     const taskType = await this.getTaskType(task.task_type_id);
     const hasCapability = await this.verifyWorkerCapability(workerId, taskType?.required_capability || "");
     if (!hasCapability) {
@@ -582,40 +703,72 @@ export const db = {
       };
     }
 
-    if (workerToken) {
-      const validToken = await this.verifyWorkerToken(taskId, workerId, workerToken);
-      if (!validToken) {
-        return { success: false, error: "Invalid worker offer token", code: 401 };
-      }
+    // Identity MUST come from the opaque per-offer worker token (no worker_id fallback)
+    if (!workerToken) {
+      return { success: false, error: "Worker offer token is required", code: 401 };
     }
 
+    const validToken = await this.verifyWorkerToken(taskId, workerId, workerToken);
+    if (!validToken) {
+      return { success: false, error: "Invalid worker offer token for this worker", code: 401 };
+    }
+
+    const eventRow = event ? makeEventRow(event, now) : null;
+
     if (pool) {
-      const res = await pool.query(
-        `UPDATE tasks
-         SET status = 'ACCEPTED', assigned_worker_id = $1, updated_at = $2
-         WHERE id = $3 AND status = 'OFFERED' AND assigned_worker_id IS NULL
-         RETURNING *`,
-        [workerId, now, taskId]
-      );
+      const client: PoolClient = await pool.connect();
+      try {
+        await client.query("BEGIN");
 
-      if (res.rows.length === 0) {
-        const existing = await pool.query(`SELECT * FROM tasks WHERE id = $1`, [taskId]);
-        if (existing.rows.length === 0) return { success: false, error: `Task ${taskId} not found`, code: 404 };
-        const t = existing.rows[0];
-        if (t.assigned_worker_id && t.assigned_worker_id !== workerId) {
-          return { success: false, error: "Task already accepted by another worker", code: 409 };
+        const res = await client.query(
+          `UPDATE tasks
+           SET status = 'ACCEPTED', assigned_worker_id = $1, updated_at = $2
+           WHERE id = $3 AND status = 'OFFERED' AND assigned_worker_id IS NULL
+           RETURNING *`,
+          [workerId, now, taskId]
+        );
+
+        if (res.rows.length === 0) {
+          await client.query("ROLLBACK");
+          const existing = await pool.query(`SELECT * FROM tasks WHERE id = $1`, [taskId]);
+          if (existing.rows.length === 0) return { success: false, error: `Task ${taskId} not found`, code: 404 };
+          const t = existing.rows[0];
+          if (t.assigned_worker_id && t.assigned_worker_id !== workerId) {
+            return { success: false, error: "Task already accepted by another worker", code: 409 };
+          }
+          return { success: false, error: `Task cannot be accepted from status '${t.status}'`, code: 400 };
         }
-        return { success: false, error: `Task cannot be accepted from status '${t.status}'`, code: 400 };
+
+        await client.query(
+          `UPDATE task_offers
+           SET status = 'ACCEPTED', responded_at = $1
+           WHERE task_id = $2 AND worker_id = $3`,
+          [now, taskId, workerId]
+        );
+
+        if (eventRow) {
+          await client.query(
+            `INSERT INTO events (id, event_type, entity_type, entity_id, payload, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [
+              eventRow.id,
+              eventRow.event_type,
+              eventRow.entity_type,
+              eventRow.entity_id,
+              JSON.stringify(eventRow.payload),
+              eventRow.created_at,
+            ]
+          );
+        }
+
+        await client.query("COMMIT");
+        return { success: true, task: res.rows[0] };
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
       }
-
-      await pool.query(
-        `UPDATE task_offers
-         SET status = 'ACCEPTED', responded_at = $1
-         WHERE task_id = $2 AND worker_id = $3`,
-        [now, taskId, workerId]
-      );
-
-      return { success: true, task: res.rows[0] };
     } else {
       const memTask = memStore.tasks.get(taskId);
       if (!memTask) return { success: false, error: `Task ${taskId} not found`, code: 404 };
@@ -641,6 +794,10 @@ export const db = {
         offer.responded_at = now;
       }
 
+      if (eventRow) {
+        memStore.events.push(eventRow);
+      }
+
       return { success: true, task: { ...memTask } };
     }
   },
@@ -655,11 +812,12 @@ export const db = {
     const pool = getPgPool();
     const now = new Date().toISOString();
 
-    if (workerToken) {
-      const validToken = await this.verifyWorkerToken(taskId, workerId, workerToken);
-      if (!validToken) {
-        return { success: false, error: "Invalid worker token", code: 401 };
-      }
+    if (!workerToken) {
+      return { success: false, error: "Worker offer token is required", code: 401 };
+    }
+    const validToken = await this.verifyWorkerToken(taskId, workerId, workerToken);
+    if (!validToken) {
+      return { success: false, error: "Invalid worker token for this worker", code: 401 };
     }
 
     if (pool) {
@@ -706,11 +864,12 @@ export const db = {
     const pool = getPgPool();
     const now = new Date().toISOString();
 
-    if (params.workerToken) {
-      const validToken = await this.verifyWorkerToken(params.taskId, params.workerId, params.workerToken);
-      if (!validToken) {
-        return { success: false, error: "Invalid worker token", code: 401 };
-      }
+    if (!params.workerToken) {
+      return { success: false, error: "Worker offer token is required", code: 401 };
+    }
+    const validToken = await this.verifyWorkerToken(params.taskId, params.workerId, params.workerToken);
+    if (!validToken) {
+      return { success: false, error: "Invalid worker token for this worker", code: 401 };
     }
 
     if (pool) {

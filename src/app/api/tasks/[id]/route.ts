@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getTaskState } from "@/services/tasks";
-import { apiError, ServiceError } from "@/lib/errors";
+import { handleServiceError } from "@/lib/errors";
 
 export async function GET(
   request: NextRequest,
@@ -8,13 +8,20 @@ export async function GET(
 ) {
   try {
     const resolvedParams = await params;
-    const result = await getTaskState(resolvedParams.id);
+
+    const authHeader = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+    const customAgentHeader = request.headers.get("x-agent-token");
+    const workerHeader = request.headers.get("x-worker-token");
+    const queryAgentToken = request.nextUrl.searchParams.get("agent_token");
+    const queryWorkerToken = request.nextUrl.searchParams.get("worker_token");
+    const queryToken = request.nextUrl.searchParams.get("token");
+
+    const agentToken = authHeader || customAgentHeader || queryAgentToken || queryToken || undefined;
+    const workerToken = workerHeader || queryWorkerToken || queryToken || undefined;
+
+    const result = await getTaskState(resolvedParams.id, agentToken, workerToken);
     return NextResponse.json(result, { status: 200 });
   } catch (err: unknown) {
-    if (err instanceof ServiceError) {
-      return apiError(err.message, err.code, err.status, err.details);
-    }
-    const message = err instanceof Error ? err.message : "Internal server error";
-    return apiError(message, "INTERNAL_ERROR", 500);
+    return handleServiceError(err);
   }
 }

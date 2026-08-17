@@ -110,8 +110,10 @@ export const CreateQuoteRequestSchema = z.object({
 });
 
 export const CreateTaskRequestSchema = z.object({
+  // Idempotency is keyed by quote_id (tasks.quote_id is unique). No separate
+  // idempotency_key parameter is accepted: exposing a field with false
+  // semantics would mislead API clients.
   quote_id: z.string().min(1, "quote_id is required"),
-  idempotency_key: z.string().optional(),
 });
 
 export const AcceptTaskRequestSchema = z.object({

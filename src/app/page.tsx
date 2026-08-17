@@ -8,7 +8,6 @@ import {
   Terminal,
   Activity,
   Zap,
-  ExternalLink,
   Shield,
   Clock,
   Layers,
@@ -138,7 +137,10 @@ export default function AgentSandboxPage() {
     }
   };
 
-  // One-Click Automated 5-Step Simulation
+  // One-Click Automated 3-Step Simulation (Quote -> Task -> Retrieve)
+  // NOTE: worker accept/start/submit are intentionally NOT part of the agent
+  // flow. Worker offer credentials are delivered out-of-band through the
+  // internal worker-auth channel and are never exposed to the agent.
   const handleRunFullSimulation = async () => {
     setError(null);
     setLoading(true);
@@ -160,7 +162,7 @@ export default function AgentSandboxPage() {
       if (!qRes.ok) throw new Error(q.error);
       setQuoteData(q);
 
-      // 2. Task
+      // 2. Task from quote (idempotent)
       const tRes = await fetch("/api/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -170,73 +172,8 @@ export default function AgentSandboxPage() {
       if (!tRes.ok) throw new Error(t.error);
       setTaskData(t);
 
-      // 3. Human Accept
-      const primaryOffer = t.offers?.[0];
-      const workerId =
-        primaryOffer?.worker_id ||
-        (selectedType === "LANDING_PAGE_REVIEW"
-          ? "w_alex_ux"
-          : selectedType === "ARCHITECTURE_SANITY_CHECK"
-          ? "w_sam_arch"
-          : "w_elena_fact");
-      const workerToken = primaryOffer?.worker_token || "";
-
-      const aRes = await fetch(`/api/tasks/${t.task_id}/accept`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_id: workerId, token: workerToken }),
-      });
-      if (!aRes.ok) throw new Error("Accept failed");
-
-      // 4. Start
-      await fetch(`/api/tasks/${t.task_id}/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_id: workerId, token: workerToken }),
-      });
-
-      // 5. Submit Mock Structured Result
-      let mockResult: any = {};
-      if (selectedType === "LANDING_PAGE_REVIEW") {
-        mockResult = {
-          top_issues: [
-            "Headline fails to communicate unique value in first 3 seconds",
-            "CTA button is below the fold on mobile viewports",
-            "Missing clear developer-oriented TypeScript examples",
-          ],
-          highest_impact_change: "Add an instant interactive playground above the fold",
-          conversion_blockers: ["Forced registration before viewing documentation"],
-          confidence: 0.96,
-        };
-      } else if (selectedType === "ARCHITECTURE_SANITY_CHECK") {
-        mockResult = {
-          verdict: "acceptable",
-          critical_issues: ["Connection exhaustion risk under peak 10k rps without Neon pooling adapter"],
-          recommended_changes: [
-            "Implement PgBouncer or Neon serverless connection pooler",
-            "Cache task catalogue lookups in Redis with 10m TTL",
-          ],
-          scaling_risks: ["Single-region latency for European agents"],
-          confidence: 0.92,
-        };
-      } else {
-        mockResult = {
-          verdict: "true",
-          explanation:
-            "Verified via Neon technical specifications. Compute instances branch and spin up within 500ms using Copy-on-Write storage layers.",
-          confidence: 0.98,
-          source_notes: "Neon Architecture whitepaper (2025/2026 edition)",
-        };
-      }
-
-      const sRes = await fetch(`/api/tasks/${t.task_id}/submit`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_id: workerId, token: workerToken, result_payload: mockResult }),
-      });
-      if (!sRes.ok) throw new Error("Submit failed");
-
-      // 6. Retrieve
+      // 3. Retrieve (will report RESULT_NOT_READY until a human completes it
+      // via the worker interface using the delivered credential)
       const rRes = await fetch(`/api/tasks/${t.task_id}/result`, {
         headers: t.agent_token ? { Authorization: `Bearer ${t.agent_token}` } : {},
       });
@@ -287,7 +224,7 @@ export default function AgentSandboxPage() {
               className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-medium text-sm rounded-xl shadow-lg shadow-blue-600/30 flex items-center space-x-2 transition-all disabled:opacity-50"
             >
               <Zap className="w-4 h-4" />
-              <span>{loading ? "Running 5-Step Simulation..." : "Run 1-Click End-to-End Test"}</span>
+              <span>{loading ? "Running Simulation..." : "Run Quick Quote & Task Test"}</span>
             </button>
             <button
               onClick={handleReset}
@@ -320,9 +257,7 @@ export default function AgentSandboxPage() {
               {[
                 { num: 1, label: "Quote" },
                 { num: 2, label: "Task" },
-                { num: 3, label: "Accept" },
-                { num: 4, label: "Submit" },
-                { num: 5, label: "Result" },
+                { num: 3, label: "Result" },
               ].map((s) => (
                 <div key={s.num} className="flex items-center space-x-2">
                   <div
@@ -412,36 +347,43 @@ export default function AgentSandboxPage() {
                 </div>
               )}
 
-              {(activeStep === 3 || activeStep === 4) && taskData && (
-                <div className="w-full space-y-4">
-                  <div className="p-4 bg-emerald-950/30 border border-emerald-800/40 rounded-xl space-y-2">
-                    <div className="text-xs font-mono text-emerald-400 font-semibold">
-                      Task Created: {taskData.task_id} (Status: {taskData.status})
-                    </div>
-                    <p className="text-xs text-slate-300">
-                      Task has been offered to qualified human experts. Open the worker execution interface to accept,
-                      review, and submit.
-                    </p>
-                    <a
-                      href={`/tasks/${taskData.task_id}`}
-                      target="_blank"
-                      className="inline-flex items-center space-x-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs rounded-lg transition-all"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      <span>Open Worker Task Page in New Tab</span>
-                    </a>
-                  </div>
-
-                  <button
-                    onClick={handleRetrieveResult}
-                    disabled={loading}
-                    className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-white font-medium text-sm rounded-xl border border-slate-700 flex items-center justify-center space-x-2 transition-all"
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                    <span>Check & Retrieve Result (GET /api/tasks/{taskData.task_id}/result)</span>
-                  </button>
-                </div>
-              )}
+{(activeStep === 3 || activeStep === 4) && taskData && (
+  <div className="w-full space-y-4">
+    <div className="p-4 bg-emerald-950/30 border border-emerald-800/40 rounded-xl space-y-2">
+      <div className="text-xs font-mono text-emerald-400 font-semibold">
+        Task Created: {taskData.task_id} (Status: {taskData.status} — ESP: {taskData.agent_token ? "issued" : "n/a"})
+      </div>
+      <p className="text-xs text-slate-300">
+        Task has been offered to qualified human experts. Worker credentials are delivered
+        <strong> out-of-band</strong> through the internal worker-auth channel (INTERNAL_DEV_SECRET) and are
+        never exposed to the agent. Worker links below only become usable once the credential is attached.
+      </p>
+      {Array.isArray(taskData.offers) && taskData.offers.length > 0 && (
+        <div className="space-y-1.5">
+          {taskData.offers.map((offer: any) => (
+            <a
+              key={offer.worker_id}
+              href={offer.worker_url}
+              target="_blank"
+              rel="noreferrer"
+              className="block px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-xs font-mono text-slate-300 hover:border-emerald-600 hover:text-emerald-300 transition-all"
+            >
+              Worker offer → /tasks/{taskData.task_id}?worker_id={offer.worker_id}
+            </a>
+          ))}
+        </div>
+      )}
+      <button
+        onClick={handleRetrieveResult}
+        disabled={loading}
+        className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-white font-medium text-sm rounded-xl border border-slate-700 flex items-center justify-center space-x-2 transition-all"
+      >
+        <RefreshCw className="w-4 h-4" />
+        <span>Check & Retrieve Result (GET /api/tasks/{taskData.task_id}/result)</span>
+      </button>
+    </div>
+  </div>
+)}
 
               {activeStep === 5 && resultData && (
                 <div className="w-full space-y-3">
@@ -480,7 +422,8 @@ export default function AgentSandboxPage() {
             <div className="flex-1 overflow-y-auto pt-4 space-y-3 pr-1">
               {events.length === 0 ? (
                 <div className="text-center py-12 text-slate-500 text-xs font-mono">
-                  No events recorded yet. Run a simulation or quote above!
+                  Event stream is internal-only (INTERNAL_DEV_SECRET). Until that secret is configured, no
+                  events are visible here.
                 </div>
               ) : (
                 events.map((evt) => (

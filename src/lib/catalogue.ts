@@ -1,3 +1,43 @@
+/**
+ * Canonical result schemas — the SINGLE SOURCE OF TRUTH published via the
+ * catalogue and seeded into the database (migration 004). They must exactly
+ * match what the Zod validators in src/lib/schemas.ts accept (same required
+ * fields, enums and numeric bounds).
+ */
+export const RESULT_SCHEMAS: Record<string, Record<string, unknown>> = {
+  LANDING_PAGE_REVIEW: {
+    type: "object",
+    properties: {
+      top_issues: { type: "array", items: { type: "string" } },
+      highest_impact_change: { type: "string" },
+      conversion_blockers: { type: "array", items: { type: "string" } },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+    },
+    required: ["top_issues", "highest_impact_change", "confidence"],
+  },
+  ARCHITECTURE_SANITY_CHECK: {
+    type: "object",
+    properties: {
+      verdict: { type: "string", enum: ["good", "acceptable", "risky"] },
+      critical_issues: { type: "array", items: { type: "string" } },
+      recommended_changes: { type: "array", items: { type: "string" } },
+      scaling_risks: { type: "array", items: { type: "string" } },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+    },
+    required: ["verdict", "recommended_changes", "confidence"],
+  },
+  EXPERT_FACT_VERIFICATION: {
+    type: "object",
+    properties: {
+      verdict: { type: "string", enum: ["true", "false", "partial", "cannot_confirm"] },
+      explanation: { type: "string" },
+      confidence: { type: "number", minimum: 0, maximum: 1 },
+      source_notes: { type: "string" },
+    },
+    required: ["verdict", "explanation", "confidence"],
+  },
+};
+
 export interface TaskCatalogueItem {
   code: string;
   title: string;
@@ -23,16 +63,7 @@ export const TASK_CATALOGUE: Record<string, TaskCatalogueItem> = {
     required_capability: "UX_CONVERSION_ANALYSIS",
     risk_level: "LOW",
     mvp: true,
-    result_schema: {
-      type: "object",
-      required: ["top_issues", "highest_impact_change", "conversion_blockers", "confidence"],
-      properties: {
-        top_issues: { type: "array", items: { type: "string" } },
-        highest_impact_change: { type: "string" },
-        conversion_blockers: { type: "array", items: { type: "string" } },
-        confidence: { type: "number", minimum: 0, maximum: 1 },
-      },
-    },
+    result_schema: RESULT_SCHEMAS.LANDING_PAGE_REVIEW,
     example_input: {
       url: "https://example.com/checkout",
       target_audience: "B2B SaaS founders looking for automated human capability",
@@ -49,17 +80,7 @@ export const TASK_CATALOGUE: Record<string, TaskCatalogueItem> = {
     required_capability: "SYSTEM_ARCHITECTURE",
     risk_level: "MEDIUM",
     mvp: true,
-    result_schema: {
-      type: "object",
-      required: ["verdict", "critical_issues", "recommended_changes", "scaling_risks", "confidence"],
-      properties: {
-        verdict: { type: "string", enum: ["good", "acceptable", "risky"] },
-        critical_issues: { type: "array", items: { type: "string" } },
-        recommended_changes: { type: "array", items: { type: "string" } },
-        scaling_risks: { type: "array", items: { type: "string" } },
-        confidence: { type: "number", minimum: 0, maximum: 1 },
-      },
-    },
+    result_schema: RESULT_SCHEMAS.ARCHITECTURE_SANITY_CHECK,
     example_input: {
       architecture_summary: "Distributed event-driven agent pipeline with Redis queue and Neon Postgres persistence.",
       components: ["Next.js API routes", "Neon Postgres", "Redis Queue", "Worker UI"],
@@ -77,16 +98,7 @@ export const TASK_CATALOGUE: Record<string, TaskCatalogueItem> = {
     required_capability: "FACT_CHECKING",
     risk_level: "LOW",
     mvp: true,
-    result_schema: {
-      type: "object",
-      required: ["verdict", "explanation", "confidence"],
-      properties: {
-        verdict: { type: "string", enum: ["true", "false", "partial", "cannot_confirm"] },
-        explanation: { type: "string" },
-        confidence: { type: "number", minimum: 0, maximum: 1 },
-        source_notes: { type: "string" },
-      },
-    },
+    result_schema: RESULT_SCHEMAS.EXPERT_FACT_VERIFICATION,
     example_input: {
       claim: "Neon serverless PostgreSQL supports cold start connection branching in under 500ms.",
       context: "Validating infrastructure claims before committing to database architecture specification.",

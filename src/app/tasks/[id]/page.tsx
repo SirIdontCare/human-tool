@@ -24,8 +24,8 @@ interface TaskData {
   status: string;
   input_payload: Record<string, any>;
   customer_price_usd: number;
-  target_payout_usd: number;
-  sla_minutes: number;
+  compensation_usd: number;
+  estimated_minutes: number;
   required_capability: string;
   risk_level: string;
   assigned_worker_id: string | null;
@@ -61,6 +61,10 @@ function WorkerTaskContent() {
   const [conversionBlockers, setConversionBlockers] = useState<string[]>([""]);
   const [landingConfidence, setLandingConfidence] = useState(0.9);
 
+  // Per-offer worker credential, delivered to the worker out-of-band (internal
+  // worker-auth channel). Required to view or act on the task.
+  const workerToken = searchParams?.get("token") || searchParams?.get("worker_token") || "";
+
   // 2. Architecture Sanity Check
   const [archVerdict, setArchVerdict] = useState<"good" | "acceptable" | "risky">("acceptable");
   const [criticalIssues, setCriticalIssues] = useState<string[]>([""]);
@@ -77,7 +81,9 @@ function WorkerTaskContent() {
   const fetchTask = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await fetch(`/api/tasks/${taskId}`);
+      const res = await fetch(`/api/tasks/${taskId}`, {
+        headers: workerToken ? { "x-worker-token": workerToken } : {},
+      });
       if (!res.ok) {
         const data = await res.json();
         throw new Error(data.error || "Failed to load task");
@@ -89,7 +95,9 @@ function WorkerTaskContent() {
       }
       if (data.status === "COMPLETED") {
         // Fetch existing result
-        const resResult = await fetch(`/api/tasks/${taskId}/result`);
+        const resResult = await fetch(`/api/tasks/${taskId}/result`, {
+          headers: workerToken ? { "x-worker-token": workerToken } : {},
+        });
         if (resResult.ok) {
           const resultData = await resResult.json();
           setSubmittedResult(resultData.result);
@@ -100,15 +108,13 @@ function WorkerTaskContent() {
     } finally {
       setLoading(false);
     }
-  }, [taskId]);
+  }, [taskId, workerToken]);
 
   useEffect(() => {
     if (taskId) {
       fetchTask();
     }
   }, [taskId, fetchTask]);
-
-  const workerToken = searchParams?.get("token") || searchParams?.get("worker_token") || "";
 
   const handleAccept = async () => {
     setError(null);
@@ -308,12 +314,12 @@ function WorkerTaskContent() {
             <div className="flex items-center space-x-6 text-sm">
               <div className="flex items-center space-x-1.5 text-emerald-400 font-semibold">
                 <DollarSign className="w-4 h-4" />
-                <span className="text-lg">${task.target_payout_usd.toFixed(2)}</span>
+                <span className="text-lg">${task.compensation_usd.toFixed(2)}</span>
                 <span className="text-xs text-slate-400 font-normal">Guaranteed Payout</span>
               </div>
               <div className="flex items-center space-x-1.5 text-slate-300">
                 <Clock className="w-4 h-4 text-amber-400" />
-                <span>{task.sla_minutes} min SLA</span>
+                <span>{task.estimated_minutes} min SLA</span>
               </div>
             </div>
           </div>
@@ -339,7 +345,7 @@ function WorkerTaskContent() {
               <div>
                 <h4 className="text-base font-semibold text-white">Guaranteed Task Offer</h4>
                 <p className="text-sm text-slate-400 mt-1">
-                  Accept this task to lock in your guaranteed ${task.target_payout_usd.toFixed(2)} compensation.
+                  Accept this task to lock in your guaranteed ${task.compensation_usd.toFixed(2)} compensation.
                 </p>
               </div>
               <button
@@ -348,7 +354,7 @@ function WorkerTaskContent() {
                 className="px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white font-medium rounded-xl shadow-lg shadow-blue-600/30 transition-all flex items-center justify-center space-x-2 shrink-0 disabled:opacity-50"
               >
                 <Check className="w-4 h-4" />
-                <span>Accept Task (${task.target_payout_usd.toFixed(2)})</span>
+                <span>Accept Task (${task.compensation_usd.toFixed(2)})</span>
               </button>
             </div>
           )}

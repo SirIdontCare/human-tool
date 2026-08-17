@@ -54,19 +54,22 @@ npm install
 ```
 
 ### Environment Variables
-Create a `.env` file (optional for local testing / development; defaults to zero-config in-memory mock store if `DATABASE_URL` is omitted):
+Create a `.env.local` file:
 ```env
 DATABASE_URL=postgresql://user:password@ep-cool-sample.us-east-2.aws.neon.tech/neondb?sslmode=require
+INTERNAL_DEV_SECRET=<random-secret>
 ```
+- `DATABASE_URL` — required for real Neon runs (migration + E2E). If omitted, the app falls back to a zero-config in-memory mock store for local development only.
+- `INTERNAL_DEV_SECRET` — required to call internal-only endpoints (`GET /api/events`, `GET /api/internal/worker-auth`). These fail closed with `401` when unset or mismatched.
 
-### Database Migration & Seed (Neon PostgreSQL)
+### Database Migration (Neon PostgreSQL)
 ```bash
 npm run db:migrate
-npm run db:seed
 ```
+Schema is managed exclusively by numbered migrations in `src/db/migrations/` (legacy `seed.sql`/`seed.ts`/`schema.sql` were removed).
 
 ### Run Automated Tests
-Runs all 9 test suites covering happy paths, race conditions, expired quotes, malformed schemas, and API handlers:
+Runs the full lifecycle suite (17 tests) and API route suite (10 tests) covering happy paths, race conditions, token authorization boundaries, payout privacy, expired quotes, malformed schemas, and API handlers:
 ```bash
 npm test
 ```
@@ -104,15 +107,15 @@ Request a guaranteed price quote.
   "quote_id": "quote_1739789000_abc123",
   "task_type": "LANDING_PAGE_REVIEW",
   "customer_price_usd": 39,
-  "target_payout_usd": 25,
   "estimated_minutes": 30,
   "required_capability": "UX_CONVERSION_ANALYSIS",
   "expires_at": "2026-08-17T11:45:00.000Z"
 }
 ```
+Internal field `target_payout_usd` is never serialized to agents.
 
 ### `POST /api/tasks`
-Create a task from a valid, unexpired quote.
+Create a task from a valid, unexpired quote. Idempotent: replaying the same `quote_id` returns the existing task with a **rotated agent token** (the previous token is revoked).
 **Request Body:**
 ```json
 {
@@ -127,31 +130,30 @@ Create a task from a valid, unexpired quote.
   "task_type": "LANDING_PAGE_REVIEW",
   "status": "OFFERED",
   "customer_price_usd": 39,
-  "target_payout_usd": 25,
   "estimated_minutes": 30,
+  "agent_token": "atk_...",
   "worker_task_url": "http://localhost:3000/tasks/task_1739789050_xyz789"
 }
 ```
+`agent_token` authorizes `GET /api/tasks/:id` and `GET /api/tasks/:id/result`. Worker credentials are **never** returned to the agent; they are delivered out-of-band via the internal worker-auth channel.
 
 ### `GET /api/tasks/:id`
-Fetch current state and input payload of a task.
+Fetch current state and input payload. **Requires** an agent token (`Authorization: Bearer` / `x-agent-token`) or a worker offer token (`x-worker-token` / `worker_token` query param). Unauthenticated requests fail closed with `401`.
+Authenticated workers additionally see `compensation_usd` (their guaranteed payout); `target_payout_usd` is never serialized.
 
 ### `POST /api/tasks/:id/accept`
-Worker claims the task (guarded against concurrency races).
+Worker claims the task (atomic single Postgres transaction; concurrent second claim gets `409 TASK_ALREADY_ACCEPTED`).
 **Request Body:**
 ```json
 { "worker_id": "w_alex_ux" }
 ```
+Worker identity is verified from the per-offer bearer token (header `x-worker-token` or `worker_token` query param) — a matching `worker_id` alone is rejected with `401 WORKER_NOT_AUTHORIZED`.
 
 ### `POST /api/tasks/:id/start`
-Worker transitions task to `IN_PROGRESS`.
-**Request Body:**
-```json
-{ "worker_id": "w_alex_ux" }
-```
+Worker transitions task to `IN_PROGRESS`. Same worker-token requirement as `accept`.
 
 ### `POST /api/tasks/:id/submit`
-Worker submits structured result (validated server-side against task type schema).
+Worker submits structured result (validated server-side against the canonical task-type schema). Same worker-token requirement. Duplicate submissions get `409 RESULT_ALREADY_SUBMITTED`.
 **Request Body:**
 ```json
 {
@@ -166,10 +168,13 @@ Worker submits structured result (validated server-side against task type schema
 ```
 
 ### `GET /api/tasks/:id/result`
-Agent retrieves structured outcome. Returns `400` if task is not yet completed.
+Agent retrieves structured outcome (requires valid agent token; fails closed). Returns `400` if task is not yet completed.
 
-### `GET /api/events`
-Query lifecycle events (`quote_requested`, `quote_created`, `task_created`, `task_offered`, `task_accepted`, `task_started`, `task_submitted`, `task_completed`, `result_retrieved`).
+### `GET /api/internal/worker-auth` (internal only)
+Delivers worker credentials out-of-band. Requires `INTERNAL_DEV_SECRET` configured and matching `x-internal-key` header. Each call rotates the per-offer token (previously delivered tokens are revoked) and returns `{ worker_id, worker_token, worker_url }`.
+
+### `GET /api/events` (internal only)
+Query lifecycle events (`quote_requested`, `quote_created`, `task_created`, `task_offered`, `task_accepted`, `task_started`, `task_submitted`, `task_completed`, `result_retrieved`). Fails closed with `401` unless `INTERNAL_DEV_SECRET` is set and the `x-internal-key` header matches; there is no fallback or dev key.
 
 ---
 

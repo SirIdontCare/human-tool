@@ -1,20 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getEventsList } from "@/services/events";
-import { apiError, ServiceError } from "@/lib/errors";
+import { apiError, handleServiceError } from "@/lib/errors";
+import { isInternalRequestAuthorized } from "@/lib/internal-auth";
 
 export async function GET(request: NextRequest) {
   try {
+    if (!isInternalRequestAuthorized(request)) {
+      return apiError("Unauthorized: valid internal dev secret required", "UNAUTHORIZED", 401);
+    }
+
     const { searchParams } = new URL(request.url);
     const entityId = searchParams.get("entity_id") || undefined;
-    const isInternal = request.headers.get("x-internal-key") === (process.env.INTERNAL_DEV_SECRET || "dev-internal-key");
 
-    const events = await getEventsList(entityId, isInternal);
+    const events = await getEventsList(entityId, true);
     return NextResponse.json({ events }, { status: 200 });
   } catch (err: unknown) {
-    if (err instanceof ServiceError) {
-      return apiError(err.message, err.code, err.status, err.details);
-    }
-    const message = err instanceof Error ? err.message : "Internal server error";
-    return apiError(message, "INTERNAL_ERROR", 500);
+    return handleServiceError(err);
   }
 }

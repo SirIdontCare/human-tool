@@ -65,12 +65,10 @@ Worker submits structured result.
 Agent retrieves structured result if available.
 
 ## 4. Task State Machine
-Primary path:
+Canonical states (single source of truth; see DECISIONS.md — Sprint 1.1 Hardening):
 
 ```text
 QUOTED
-↓
-CREATED
 ↓
 OFFERED
 ↓
@@ -78,18 +76,17 @@ ACCEPTED
 ↓
 IN_PROGRESS
 ↓
-SUBMITTED
-↓
 COMPLETED
 ```
+
+`CREATED` and `SUBMITTED` are not part of the contract. Task creation produces `OFFERED` directly; accepted results transition to `COMPLETED` atomically.
 
 Terminal/alternate states:
 - CANCELLED
 - EXPIRED
-- REJECTED
 - FAILED
 
-Invalid transitions must be blocked.
+Invalid transitions must be blocked (enforced by `tasks_status_check` in the database).
 
 ## 5. Minimal Data Model
 Required tables:
@@ -187,12 +184,16 @@ No business logic should live only inside MCP.
 ## 8. Validation & Security
 Implement:
 - server-side schema validation,
-- valid state-transition enforcement,
-- authorization boundaries appropriate to MVP,
+- valid state-transition enforcement (DB-level CHECK constraints),
+- authorization boundaries:
+  - `GET /api/tasks/:id` and `GET /api/tasks/:id/result` fail closed (require a valid agent token or, for task state, a valid worker offer token),
+  - worker identity for `accept`/`start`/`submit` comes from the per-offer bearer token, never `worker_id` alone,
+  - `GET /api/events` and `GET /api/internal/worker-auth` are internal-only and fail closed unless `INTERNAL_DEV_SECRET` is set and the `x-internal-key` header matches (no fallback/dev key),
+  - `target_payout_usd` is internal-only; authenticated workers see worker-only `compensation_usd`; agent-facing responses never contain worker credentials,
 - protection against duplicate submissions,
-- basic concurrency handling around task acceptance,
-- idempotency where it materially prevents duplicate task creation,
-- logging of failures.
+- basic concurrency handling around task acceptance (atomic single-transaction claim; second claim → `409 TASK_ALREADY_ACCEPTED`),
+- idempotency where it materially prevents duplicate task creation (keyed by `quote_id`; replays rotate the agent token and revoke the previous one),
+- logging of failures (internal messages are logged server-side; clients receive a fixed public message).
 
 Do not overbuild auth.
 

@@ -36,3 +36,16 @@ export function apiError(message: string, code: ErrorCode, status: number = 400,
     { status }
   );
 }
+
+/**
+ * Uniform API route error handling: ServiceError passes through with its stable
+ * code; unexpected internal exceptions are logged server-side and returned as a
+ * fixed public message (never the raw exception text).
+ */
+export function handleServiceError(err: unknown): NextResponse {
+  if (err instanceof ServiceError) {
+    return apiError(err.message, err.code, err.status, err.details);
+  }
+  console.error("[InternalError]", err);
+  return apiError("Internal server error", "INTERNAL_ERROR", 500);
+}

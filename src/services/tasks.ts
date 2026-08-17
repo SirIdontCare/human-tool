@@ -12,9 +12,26 @@ export interface CreateTaskOutput {
   estimated_minutes: number;
   agent_token?: string;
   worker_task_url: string;
-  offers?: Array<{ worker_id: string; worker_token: string; worker_url: string }>;
+  offers?: Array<{ worker_id: string; worker_url: string }>;
   created_at: string;
   is_existing?: boolean;
+}
+
+export interface TaskStateResponse {
+  id: string;
+  quote_id: string;
+  task_type: string;
+  title: string;
+  description?: string;
+  status: string;
+  input_payload: Record<string, unknown>;
+  customer_price_usd: number;
+  estimated_minutes: number;
+  required_capability?: string;
+  assigned_worker_id: string | null;
+  created_at: string;
+  updated_at: string;
+  compensation_usd?: number;
 }
 
 export async function createTaskFromQuote(input: unknown, origin: string = ""): Promise<CreateTaskOutput> {
@@ -36,22 +53,8 @@ export async function createTaskFromQuote(input: unknown, origin: string = ""): 
     throw new ServiceError("Quote has expired", "QUOTE_EXPIRED", 400, { quote_id, expires_at: quote.expires_at });
   }
 
-  // 3. Check for existing task (Idempotency)
-  const existingTask = await db.getTaskByQuoteId(quote.id);
-  if (existingTask) {
-    return {
-      task_id: existingTask.id,
-      quote_id: existingTask.quote_id,
-      task_type: existingTask.task_type_id,
-      status: existingTask.status,
-      customer_price_usd: quote.quoted_price_usd,
-      estimated_minutes: quote.estimated_minutes,
-      worker_task_url: `${origin}/tasks/${existingTask.id}`,
-      created_at: existingTask.created_at,
-      is_existing: true,
-    };
-  }
-
+  // 3. Create task atomically (idempotent replays are handled inside db.createTask,
+  // which rotates the agent token so the replaying agent is never stranded)
   const taskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
   // 4. Create task atomically
@@ -70,6 +73,7 @@ export async function createTaskFromQuote(input: unknown, origin: string = ""): 
       status: createRes.task.status,
       customer_price_usd: quote.quoted_price_usd,
       estimated_minutes: quote.estimated_minutes,
+      agent_token: createRes.agent_token,
       worker_task_url: `${origin}/tasks/${createRes.task.id}`,
       created_at: createRes.task.created_at,
       is_existing: true,
@@ -92,10 +96,7 @@ export async function createTaskFromQuote(input: unknown, origin: string = ""): 
     });
   }
 
-  const primaryOffer = createRes.offers[0];
-  const workerTaskUrl = primaryOffer
-    ? `${origin}/tasks/${createRes.task.id}?worker_id=${primaryOffer.worker_id}&token=${primaryOffer.worker_token}`
-    : `${origin}/tasks/${createRes.task.id}`;
+  const workerTaskUrl = `${origin}/tasks/${createRes.task.id}`;
 
   return {
     task_id: createRes.task.id,
@@ -108,24 +109,35 @@ export async function createTaskFromQuote(input: unknown, origin: string = ""): 
     worker_task_url: workerTaskUrl,
     offers: createRes.offers.map((o) => ({
       worker_id: o.worker_id,
-      worker_token: o.worker_token,
-      worker_url: `${origin}/tasks/${createRes.task.id}?worker_id=${o.worker_id}&token=${o.worker_token}`,
+      worker_url: `${origin}/tasks/${createRes.task.id}?worker_id=${o.worker_id}`,
     })),
     created_at: createRes.task.created_at,
     is_existing: false,
   };
 }
 
-export async function getTaskState(taskId: string) {
+export async function getTaskState(
+  taskId: string,
+  agentToken?: string,
+  workerToken?: string
+): Promise<TaskStateResponse> {
   const task = await db.getTask(taskId);
   if (!task) {
     throw new ServiceError(`Task '${taskId}' not found`, "TASK_NOT_FOUND", 404);
   }
 
+  // Fail-closed authorization: a valid agent token OR a valid per-offer worker token is required.
+  const isAgent = Boolean(agentToken && (await db.verifyAgentToken(taskId, agentToken)));
+  const workerId = isAgent ? null : workerToken ? await db.getWorkerIdByOfferToken(taskId, workerToken) : null;
+
+  if (!isAgent && !workerId) {
+    throw new ServiceError("Unauthorized: valid agent or worker task token required", "UNAUTHORIZED", 401);
+  }
+
   const taskType = await db.getTaskType(task.task_type_id);
   const quote = await db.getQuote(task.quote_id);
 
-  return {
+  const base: TaskStateResponse = {
     id: task.id,
     quote_id: task.quote_id,
     task_type: task.task_type_id,
@@ -140,6 +152,17 @@ export async function getTaskState(taskId: string) {
     created_at: task.created_at,
     updated_at: task.updated_at,
   };
+
+  if (workerId) {
+    // WORKER-ONLY FIELDS: guaranteed compensation, derived server-side from the
+    // internal target payout. Never exposed to agents.
+    return {
+      ...base,
+      compensation_usd: quote?.target_payout_usd ?? taskType?.target_payout_usd ?? 0,
+    };
+  }
+
+  return base;
 }
 
 export async function acceptTask(taskId: string, input: unknown, workerToken?: string) {
@@ -155,7 +178,16 @@ export async function acceptTask(taskId: string, input: unknown, workerToken?: s
     throw new ServiceError(`Worker '${worker_id}' not found`, "WORKER_NOT_AUTHORIZED", 404);
   }
 
-  const acceptRes = await db.acceptTask(taskId, worker_id, workerToken);
+  const acceptRes = await db.acceptTask(taskId, worker_id, workerToken, {
+    eventType: "task_accepted",
+    entityType: "task",
+    entityId: taskId,
+    payload: {
+      worker_id,
+      worker_name: worker.display_name,
+      status: "ACCEPTED",
+    },
+  });
   if (!acceptRes.success || !acceptRes.task) {
     const code = acceptRes.code === 403
       ? "WORKER_CAPABILITY_REQUIRED"
@@ -166,12 +198,6 @@ export async function acceptTask(taskId: string, input: unknown, workerToken?: s
       : "INVALID_STATE";
     throw new ServiceError(acceptRes.error || "Failed to accept task", code, acceptRes.code || 400);
   }
-
-  await logEvent("task_accepted", "task", taskId, {
-    worker_id,
-    worker_name: worker.display_name,
-    status: acceptRes.task.status,
-  });
 
   return {
     task_id: acceptRes.task.id,
@@ -188,6 +214,10 @@ export async function startTask(taskId: string, input: unknown, workerToken?: st
   }
 
   const { worker_id } = parseResult.data;
+
+  if (!workerToken) {
+    throw new ServiceError("Worker offer token is required", "WORKER_NOT_AUTHORIZED", 401);
+  }
 
   const startRes = await db.startTask(taskId, worker_id, workerToken);
   if (!startRes.success || !startRes.task) {
@@ -215,6 +245,10 @@ export async function submitTaskResult(taskId: string, input: unknown, workerTok
   }
 
   const { worker_id, result_payload } = parseResult.data;
+
+  if (!workerToken) {
+    throw new ServiceError("Worker offer token is required", "WORKER_NOT_AUTHORIZED", 401);
+  }
 
   const task = await db.getTask(taskId);
   if (!task) {
@@ -264,11 +298,10 @@ export async function getTaskResult(taskId: string, agentToken?: string) {
     throw new ServiceError(`Task '${taskId}' not found`, "TASK_NOT_FOUND", 404);
   }
 
-  if (task.agent_token_hash) {
-    const isAuthorized = await db.verifyAgentToken(taskId, agentToken || "");
-    if (!isAuthorized) {
-      throw new ServiceError("Unauthorized: Invalid or missing agent task token", "UNAUTHORIZED", 401);
-    }
+  // Fail-closed: a missing stored hash, missing token, or unverifiable token is
+  // always UNAUTHORIZED. Never falls through to public access.
+  if (!task.agent_token_hash || !agentToken || !(await db.verifyAgentToken(taskId, agentToken))) {
+    throw new ServiceError("Unauthorized: Invalid or missing agent task token", "UNAUTHORIZED", 401);
   }
 
   if (task.status !== "COMPLETED") {
