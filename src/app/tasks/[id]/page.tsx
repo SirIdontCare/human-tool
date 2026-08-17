@@ -83,6 +83,27 @@ function WorkerTaskContent() {
   const [sourceNotes, setSourceNotes] = useState("");
   const [factConfidence, setFactConfidence] = useState(0.95);
 
+  // 4. AI Video Review
+  const [videoVerdict, setVideoVerdict] = useState<"client_ready" | "minor_revisions" | "needs_regeneration">("minor_revisions");
+  const [videoVisualCoherence, setVideoVisualCoherence] = useState("");
+  const [videoMotionArtifacts, setVideoMotionArtifacts] = useState("");
+  const [videoClientReadiness, setVideoClientReadiness] = useState("");
+  const [videoOverallVerdict, setVideoOverallVerdict] = useState("");
+
+  // 5. Software Product Review
+  const [productVerdict, setProductVerdict] = useState<"ready_to_ship" | "needs_polish" | "major_friction">("needs_polish");
+  const [productUxClarity, setProductUxClarity] = useState("");
+  const [productValueProposition, setProductValueProposition] = useState("");
+  const [productOnboardingFriction, setProductOnboardingFriction] = useState("");
+  const [productOverallVerdict, setProductOverallVerdict] = useState("");
+
+  // 6. AI Workflow Review
+  const [workflowVerdict, setWorkflowVerdict] = useState<"production_ready" | "needs_safeguards" | "architecturally_flawed">("needs_safeguards");
+  const [workflowReliability, setWorkflowReliability] = useState("");
+  const [workflowEdgeCases, setWorkflowEdgeCases] = useState("");
+  const [workflowHumanInTheLoop, setWorkflowHumanInTheLoop] = useState("");
+  const [workflowOverallVerdict, setWorkflowOverallVerdict] = useState("");
+
   const fetchTask = useCallback(async () => {
     try {
       setLoading(true);
@@ -250,6 +271,117 @@ function WorkerTaskContent() {
           explanation: factExplanation.trim(),
           confidence: Number(factConfidence),
           source_notes: sourceNotes.trim() || undefined,
+        };
+      } else if (task?.task_type === "AI_VIDEO_REVIEW") {
+        if (landingIssues.length !== 3) throw new Error("Exactly 3 top issues are required.");
+        for (let i = 0; i < 3; i++) {
+          const issue = landingIssues[i];
+          if (!issue.issue || issue.issue.trim().length < 10) throw new Error(`Issue #${i + 1}: Description must be at least 10 characters.`);
+          if (!issue.evidence || issue.evidence.trim().length < 15) throw new Error(`Issue #${i + 1}: Evidence must be at least 15 characters.`);
+          if (!issue.why_it_matters || issue.why_it_matters.trim().length < 15) throw new Error(`Issue #${i + 1}: 'Why it matters' must be at least 15 characters.`);
+          if (!issue.recommended_change || issue.recommended_change.trim().length < 15) throw new Error(`Issue #${i + 1}: Recommended change must be at least 15 characters.`);
+        }
+        if (!highestImpactChange.change.trim() || highestImpactChange.change.trim().length < 15) throw new Error("Highest impact change: 'Change' must be at least 15 characters.");
+        if (!highestImpactChange.rationale.trim() || highestImpactChange.rationale.trim().length < 20) throw new Error("Highest impact change: 'Rationale' must be at least 20 characters.");
+        if (!highestImpactChange.expected_effect.trim() || highestImpactChange.expected_effect.trim().length < 15) throw new Error("Highest impact change: 'Expected effect' must be at least 15 characters.");
+        if (!videoVisualCoherence.trim() || videoVisualCoherence.trim().length < 20) throw new Error("Visual coherence assessment must be at least 20 characters.");
+        if (!videoMotionArtifacts.trim() || videoMotionArtifacts.trim().length < 20) throw new Error("Motion artifacts assessment must be at least 20 characters.");
+        if (!videoClientReadiness.trim() || videoClientReadiness.trim().length < 20) throw new Error("Client readiness assessment must be at least 20 characters.");
+        if (!videoOverallVerdict.trim() || videoOverallVerdict.trim().length < 20) throw new Error("Overall verdict must be at least 20 characters.");
+
+        resultPayload = {
+          verdict: videoVerdict,
+          top_issues: landingIssues.map((it) => ({
+            issue: it.issue.trim(),
+            evidence: it.evidence.trim(),
+            why_it_matters: it.why_it_matters.trim(),
+            recommended_change: it.recommended_change.trim(),
+            severity: it.severity,
+          })),
+          highest_impact_change: {
+            change: highestImpactChange.change.trim(),
+            rationale: highestImpactChange.rationale.trim(),
+            expected_effect: highestImpactChange.expected_effect.trim(),
+          },
+          visual_coherence_assessment: videoVisualCoherence.trim(),
+          motion_artifacts_assessment: videoMotionArtifacts.trim(),
+          client_readiness_assessment: videoClientReadiness.trim(),
+          overall_verdict: videoOverallVerdict.trim(),
+          confidence: Number(landingConfidence),
+        };
+      } else if (task?.task_type === "SOFTWARE_PRODUCT_REVIEW") {
+        if (landingIssues.length !== 3) throw new Error("Exactly 3 top issues are required.");
+        for (let i = 0; i < 3; i++) {
+          const issue = landingIssues[i];
+          if (!issue.issue || issue.issue.trim().length < 10) throw new Error(`Issue #${i + 1}: Description must be at least 10 characters.`);
+          if (!issue.evidence || issue.evidence.trim().length < 15) throw new Error(`Issue #${i + 1}: Evidence must be at least 15 characters.`);
+          if (!issue.why_it_matters || issue.why_it_matters.trim().length < 15) throw new Error(`Issue #${i + 1}: 'Why it matters' must be at least 15 characters.`);
+          if (!issue.recommended_change || issue.recommended_change.trim().length < 15) throw new Error(`Issue #${i + 1}: Recommended change must be at least 15 characters.`);
+        }
+        if (!highestImpactChange.change.trim() || highestImpactChange.change.trim().length < 15) throw new Error("Highest impact change: 'Change' must be at least 15 characters.");
+        if (!highestImpactChange.rationale.trim() || highestImpactChange.rationale.trim().length < 20) throw new Error("Highest impact change: 'Rationale' must be at least 20 characters.");
+        if (!highestImpactChange.expected_effect.trim() || highestImpactChange.expected_effect.trim().length < 15) throw new Error("Highest impact change: 'Expected effect' must be at least 15 characters.");
+        if (!productUxClarity.trim() || productUxClarity.trim().length < 20) throw new Error("UX clarity assessment must be at least 20 characters.");
+        if (!productValueProposition.trim() || productValueProposition.trim().length < 20) throw new Error("Value proposition assessment must be at least 20 characters.");
+        if (!productOnboardingFriction.trim() || productOnboardingFriction.trim().length < 20) throw new Error("Onboarding friction assessment must be at least 20 characters.");
+        if (!productOverallVerdict.trim() || productOverallVerdict.trim().length < 20) throw new Error("Overall verdict must be at least 20 characters.");
+
+        resultPayload = {
+          verdict: productVerdict,
+          top_issues: landingIssues.map((it) => ({
+            issue: it.issue.trim(),
+            evidence: it.evidence.trim(),
+            why_it_matters: it.why_it_matters.trim(),
+            recommended_change: it.recommended_change.trim(),
+            severity: it.severity,
+          })),
+          highest_impact_change: {
+            change: highestImpactChange.change.trim(),
+            rationale: highestImpactChange.rationale.trim(),
+            expected_effect: highestImpactChange.expected_effect.trim(),
+          },
+          ux_clarity_assessment: productUxClarity.trim(),
+          value_proposition_assessment: productValueProposition.trim(),
+          onboarding_friction_assessment: productOnboardingFriction.trim(),
+          overall_verdict: productOverallVerdict.trim(),
+          confidence: Number(landingConfidence),
+        };
+      } else if (task?.task_type === "AI_WORKFLOW_REVIEW") {
+        if (landingIssues.length !== 3) throw new Error("Exactly 3 top issues are required.");
+        for (let i = 0; i < 3; i++) {
+          const issue = landingIssues[i];
+          if (!issue.issue || issue.issue.trim().length < 10) throw new Error(`Issue #${i + 1}: Description must be at least 10 characters.`);
+          if (!issue.evidence || issue.evidence.trim().length < 15) throw new Error(`Issue #${i + 1}: Evidence must be at least 15 characters.`);
+          if (!issue.why_it_matters || issue.why_it_matters.trim().length < 15) throw new Error(`Issue #${i + 1}: 'Why it matters' must be at least 15 characters.`);
+          if (!issue.recommended_change || issue.recommended_change.trim().length < 15) throw new Error(`Issue #${i + 1}: Recommended change must be at least 15 characters.`);
+        }
+        if (!highestImpactChange.change.trim() || highestImpactChange.change.trim().length < 15) throw new Error("Highest impact change: 'Change' must be at least 15 characters.");
+        if (!highestImpactChange.rationale.trim() || highestImpactChange.rationale.trim().length < 20) throw new Error("Highest impact change: 'Rationale' must be at least 20 characters.");
+        if (!highestImpactChange.expected_effect.trim() || highestImpactChange.expected_effect.trim().length < 15) throw new Error("Highest impact change: 'Expected effect' must be at least 15 characters.");
+        if (!workflowReliability.trim() || workflowReliability.trim().length < 20) throw new Error("Reliability assessment must be at least 20 characters.");
+        if (!workflowEdgeCases.trim() || workflowEdgeCases.trim().length < 20) throw new Error("Edge case handling assessment must be at least 20 characters.");
+        if (!workflowHumanInTheLoop.trim() || workflowHumanInTheLoop.trim().length < 20) throw new Error("Human-in-the-loop assessment must be at least 20 characters.");
+        if (!workflowOverallVerdict.trim() || workflowOverallVerdict.trim().length < 20) throw new Error("Overall verdict must be at least 20 characters.");
+
+        resultPayload = {
+          verdict: workflowVerdict,
+          top_issues: landingIssues.map((it) => ({
+            issue: it.issue.trim(),
+            evidence: it.evidence.trim(),
+            why_it_matters: it.why_it_matters.trim(),
+            recommended_change: it.recommended_change.trim(),
+            severity: it.severity,
+          })),
+          highest_impact_change: {
+            change: highestImpactChange.change.trim(),
+            rationale: highestImpactChange.rationale.trim(),
+            expected_effect: highestImpactChange.expected_effect.trim(),
+          },
+          reliability_assessment: workflowReliability.trim(),
+          edge_case_handling_assessment: workflowEdgeCases.trim(),
+          human_in_the_loop_assessment: workflowHumanInTheLoop.trim(),
+          overall_verdict: workflowOverallVerdict.trim(),
+          confidence: Number(landingConfidence),
         };
       }
 
@@ -921,6 +1053,366 @@ function WorkerTaskContent() {
                       onChange={(e) => setFactConfidence(parseFloat(e.target.value))}
                       className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
                     />
+                  </div>
+                </div>
+              )}
+
+              {/* 4. AI_VIDEO_REVIEW */}
+              {task.task_type === "AI_VIDEO_REVIEW" && (
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                      Video Readiness Verdict
+                    </label>
+                    <div className="grid grid-cols-3 gap-3">
+                      {(["client_ready", "minor_revisions", "needs_regeneration"] as const).map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => setVideoVerdict(v)}
+                          className={`py-2 px-3 rounded-lg text-xs font-semibold border uppercase transition-all ${
+                            videoVerdict === v
+                              ? v === "client_ready"
+                                ? "bg-emerald-950/80 border-emerald-500 text-emerald-300"
+                                : v === "minor_revisions"
+                                ? "bg-amber-950/80 border-amber-500 text-amber-300"
+                                : "bg-red-950/80 border-red-500 text-red-300"
+                              : "bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700"
+                          }`}
+                        >
+                          {v.replace("_", " ")}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Shared 3-issue block */}
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-200 mb-3 flex items-center justify-between">
+                      <span>Top 3 Quality & Generation Issues (Required)</span>
+                    </h4>
+                    <div className="space-y-4">
+                      {landingIssues.map((issue, idx) => (
+                        <div key={idx} className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold uppercase tracking-wider text-blue-400">Issue #{idx + 1}</span>
+                            <div className="flex items-center space-x-2">
+                              <label className="text-xs text-slate-400">Severity:</label>
+                              <select
+                                value={issue.severity}
+                                onChange={(e) => {
+                                  const copy = [...landingIssues];
+                                  copy[idx] = { ...copy[idx], severity: e.target.value as "high" | "medium" | "low" };
+                                  setLandingIssues(copy);
+                                }}
+                                className="bg-slate-900 border border-slate-700 text-xs text-slate-200 rounded px-2 py-1"
+                              >
+                                <option value="high">High</option>
+                                <option value="medium">Medium</option>
+                                <option value="low">Low</option>
+                              </select>
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-slate-400 mb-1">Issue Description (min 10 chars)</label>
+                            <input
+                              type="text"
+                              value={issue.issue}
+                              onChange={(e) => {
+                                const copy = [...landingIssues];
+                                copy[idx] = { ...copy[idx], issue: e.target.value };
+                                setLandingIssues(copy);
+                              }}
+                              placeholder="e.g. Hand geometry deforms noticeably during camera rotation"
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                              required
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs text-slate-400 mb-1">Evidence / Timestamp (min 15 chars)</label>
+                            <textarea
+                              rows={2}
+                              value={issue.evidence}
+                              onChange={(e) => {
+                                const copy = [...landingIssues];
+                                copy[idx] = { ...copy[idx], evidence: e.target.value };
+                                setLandingIssues(copy);
+                              }}
+                              placeholder="Observed at 0:02-0:04: fingers merge into coffee mug during grip"
+                              className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                              required
+                            />
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">Why It Matters (min 15 chars)</label>
+                              <textarea
+                                rows={2}
+                                value={issue.why_it_matters}
+                                onChange={(e) => {
+                                  const copy = [...landingIssues];
+                                  copy[idx] = { ...copy[idx], why_it_matters: e.target.value };
+                                  setLandingIssues(copy);
+                                }}
+                                placeholder="Breaks immersion and makes commercial advertisement look amateurish"
+                                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                                required
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-slate-400 mb-1">Recommended Fix (min 15 chars)</label>
+                              <textarea
+                                rows={2}
+                                value={issue.recommended_change}
+                                onChange={(e) => {
+                                  const copy = [...landingIssues];
+                                  copy[idx] = { ...copy[idx], recommended_change: e.target.value };
+                                  setLandingIssues(copy);
+                                }}
+                                placeholder="Inpaint frame 45-75 with masked hand seed or crop to medium close-up"
+                                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                                required
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Highest Impact Change */}
+                  <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-3">
+                    <h4 className="text-sm font-bold text-slate-200">Highest Impact Fix</h4>
+                    <input
+                      type="text"
+                      value={highestImpactChange.change}
+                      onChange={(e) => setHighestImpactChange({ ...highestImpactChange, change: e.target.value })}
+                      placeholder="Specific change (min 15 chars)"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                      required
+                    />
+                    <textarea
+                      rows={2}
+                      value={highestImpactChange.rationale}
+                      onChange={(e) => setHighestImpactChange({ ...highestImpactChange, rationale: e.target.value })}
+                      placeholder="Rationale (min 20 chars)"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                      required
+                    />
+                    <input
+                      type="text"
+                      value={highestImpactChange.expected_effect}
+                      onChange={(e) => setHighestImpactChange({ ...highestImpactChange, expected_effect: e.target.value })}
+                      placeholder="Expected effect (min 15 chars)"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                      required
+                    />
+                  </div>
+
+                  {/* Dimensional Assessments */}
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Visual Coherence Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={videoVisualCoherence}
+                        onChange={(e) => setVideoVisualCoherence(e.target.value)}
+                        placeholder="Evaluate style consistency, physics realism, and lighting stability..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Motion Artifacts Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={videoMotionArtifacts}
+                        onChange={(e) => setVideoMotionArtifacts(e.target.value)}
+                        placeholder="Evaluate camera jitter, morphing, temporal flickering, and ghosting..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Client Readiness Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={videoClientReadiness}
+                        onChange={(e) => setVideoClientReadiness(e.target.value)}
+                        placeholder="Is this ready for commercial client delivery or public advertising?..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Overall Verdict (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={videoOverallVerdict}
+                        onChange={(e) => setVideoOverallVerdict(e.target.value)}
+                        placeholder="Synthesized verdict and recommendation..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 5. SOFTWARE_PRODUCT_REVIEW */}
+              {task.task_type === "SOFTWARE_PRODUCT_REVIEW" && (
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                      Product Readiness Verdict
+                    </label>
+                    <div className="grid grid-cols-3 gap-3">
+                      {(["ready_to_ship", "needs_polish", "major_friction"] as const).map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => setProductVerdict(v)}
+                          className={`py-2 px-3 rounded-lg text-xs font-semibold border uppercase transition-all ${
+                            productVerdict === v
+                              ? v === "ready_to_ship"
+                                ? "bg-emerald-950/80 border-emerald-500 text-emerald-300"
+                                : v === "needs_polish"
+                                ? "bg-amber-950/80 border-amber-500 text-amber-300"
+                                : "bg-red-950/80 border-red-500 text-red-300"
+                              : "bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700"
+                          }`}
+                        >
+                          {v.replace("_", " ")}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Dimensional Assessments */}
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">UX Clarity Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={productUxClarity}
+                        onChange={(e) => setProductUxClarity(e.target.value)}
+                        placeholder="Evaluate interface clarity, information scent, and mental model alignment..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Value Proposition Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={productValueProposition}
+                        onChange={(e) => setProductValueProposition(e.target.value)}
+                        placeholder="Does the core product feature immediately demonstrate its tangible value?..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Onboarding Friction Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={productOnboardingFriction}
+                        onChange={(e) => setProductOnboardingFriction(e.target.value)}
+                        placeholder="Evaluate steps to first 'aha' moment, cognitive load, and signup blockers..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Overall Verdict (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={productOverallVerdict}
+                        onChange={(e) => setProductOverallVerdict(e.target.value)}
+                        placeholder="Founder assessment and roadmap prioritization..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 6. AI_WORKFLOW_REVIEW */}
+              {task.task_type === "AI_WORKFLOW_REVIEW" && (
+                <div className="space-y-6">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">
+                      Workflow Robustness Verdict
+                    </label>
+                    <div className="grid grid-cols-3 gap-3">
+                      {(["production_ready", "needs_safeguards", "architecturally_flawed"] as const).map((v) => (
+                        <button
+                          key={v}
+                          type="button"
+                          onClick={() => setWorkflowVerdict(v)}
+                          className={`py-2 px-3 rounded-lg text-xs font-semibold border uppercase transition-all ${
+                            workflowVerdict === v
+                              ? v === "production_ready"
+                                ? "bg-emerald-950/80 border-emerald-500 text-emerald-300"
+                                : v === "needs_safeguards"
+                                ? "bg-amber-950/80 border-amber-500 text-amber-300"
+                                : "bg-red-950/80 border-red-500 text-red-300"
+                              : "bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700"
+                          }`}
+                        >
+                          {v.replace("_", " ")}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Dimensional Assessments */}
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Reliability & Determinism Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={workflowReliability}
+                        onChange={(e) => setWorkflowReliability(e.target.value)}
+                        placeholder="Evaluate pipeline failure points, retry strategies, and idempotency..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Edge Case Handling Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={workflowEdgeCases}
+                        onChange={(e) => setWorkflowEdgeCases(e.target.value)}
+                        placeholder="Evaluate model hallucination recovery, schema validation, and rate limit resilience..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Human-in-the-Loop Safeguard Assessment (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={workflowHumanInTheLoop}
+                        onChange={(e) => setWorkflowHumanInTheLoop(e.target.value)}
+                        placeholder="Evaluate confidence thresholds, fallback escalation, and human operator load..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">Overall Verdict (min 20 chars)</label>
+                      <textarea
+                        rows={2}
+                        value={workflowOverallVerdict}
+                        onChange={(e) => setWorkflowOverallVerdict(e.target.value)}
+                        placeholder="Practical judgment and production readiness verdict..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                        required
+                      />
+                    </div>
                   </div>
                 </div>
               )}

@@ -137,6 +137,7 @@ class InMemoryStore {
     }
 
     const mockWorkers: WorkerRow[] = [
+      { id: "w_founder", display_name: "Pawel (Founder)", email: "pawel@human-tool.com", status: "ACTIVE", created_at: new Date().toISOString() },
       { id: "w_alex_ux", display_name: "Alex Rivera (Senior UX Specialist)", email: "alex@example.com", status: "ACTIVE", created_at: new Date().toISOString() },
       { id: "w_sam_arch", display_name: "Sam Chen (Principal Cloud Architect)", email: "sam@example.com", status: "ACTIVE", created_at: new Date().toISOString() },
       { id: "w_elena_fact", display_name: "Dr. Elena Rostova (Research Analyst)", email: "elena@example.com", status: "ACTIVE", created_at: new Date().toISOString() },
@@ -148,6 +149,9 @@ class InMemoryStore {
     }
 
     const mockCaps: WorkerCapabilityRow[] = [
+      { id: "wc_founder_1", worker_id: "w_founder", capability_code: "AI_VIDEO_REVIEW", score: 0.99, status: "VERIFIED", verified_at: new Date().toISOString() },
+      { id: "wc_founder_2", worker_id: "w_founder", capability_code: "SOFTWARE_PRODUCT_REVIEW", score: 0.99, status: "VERIFIED", verified_at: new Date().toISOString() },
+      { id: "wc_founder_3", worker_id: "w_founder", capability_code: "AI_WORKFLOW_REVIEW", score: 0.99, status: "VERIFIED", verified_at: new Date().toISOString() },
       { id: "wc_1", worker_id: "w_alex_ux", capability_code: "UX_CONVERSION_ANALYSIS", score: 0.98, status: "VERIFIED", verified_at: new Date().toISOString() },
       { id: "wc_2", worker_id: "w_sam_arch", capability_code: "SYSTEM_ARCHITECTURE", score: 0.99, status: "VERIFIED", verified_at: new Date().toISOString() },
       { id: "wc_3", worker_id: "w_elena_fact", capability_code: "FACT_CHECKING", score: 0.99, status: "VERIFIED", verified_at: new Date().toISOString() },

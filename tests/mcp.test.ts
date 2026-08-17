@@ -679,4 +679,76 @@ describe("Sprint 2 MCP Adapter Protocol Invariant Tests", () => {
     expect(resultData.result.overall_verdict).toBeDefined();
     expect(resultData.result.confidence).toBe(0.96);
   });
+
+  // Test 24: MCP Founder Human Node capabilities (AI_VIDEO_REVIEW, SOFTWARE_PRODUCT_REVIEW, AI_WORKFLOW_REVIEW)
+  it("24. quote_human and call_human succeed for founder task types via MCP", async () => {
+    const founderTypes = [
+      {
+        type: "AI_VIDEO_REVIEW",
+        payload: {
+          video_url: "https://example.com/clip.mp4",
+          generation_context: "Sora 2.0 commercial shoot",
+          intended_use: "Hero marketing page video",
+        },
+      },
+      {
+        type: "SOFTWARE_PRODUCT_REVIEW",
+        payload: {
+          product_url: "https://staging.example.com",
+          product_summary: "Autonomous agent dispatch platform",
+          target_users: "B2B engineering managers",
+          key_flows_to_test: ["Onboarding and first task dispatch"],
+        },
+      },
+      {
+        type: "AI_WORKFLOW_REVIEW",
+        payload: {
+          workflow_summary: "Automated invoice parsing with LLM fallback",
+          steps: ["Webhook ingest", "LLM extraction", "Human verification", "DB write"],
+          failure_modes_considered: ["Parse failures"],
+          expected_throughput: "500 docs/day",
+        },
+      },
+    ];
+
+    for (const item of founderTypes) {
+      const quoteRes = await client.callTool({
+        name: "quote_human",
+        arguments: {
+          task_type: item.type,
+          input_payload: item.payload,
+        },
+      });
+
+      expect(quoteRes.isError).toBeFalsy();
+      const quote = parseJsonContent<{
+        quote_id: string;
+        task_type: string;
+        customer_price_usd: number;
+        agent_token: string;
+      }>(quoteRes);
+
+      expect(quote.task_type).toBe(item.type);
+      expect(quote.customer_price_usd).toBe(39.0);
+      expect(quote.agent_token).toBeDefined();
+
+      const callRes = await client.callTool({
+        name: "call_human",
+        arguments: {
+          quote_id: quote.quote_id,
+          agent_token: quote.agent_token,
+        },
+      });
+
+      expect(callRes.isError).toBeFalsy();
+      const task = parseJsonContent<{
+        task_id: string;
+        task_type: string;
+        status: string;
+      }>(callRes);
+
+      expect(task.task_type).toBe(item.type);
+      expect(task.status).toBe("OFFERED");
+    }
+  });
 });

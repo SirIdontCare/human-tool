@@ -5,6 +5,9 @@ export const TaskTypeCode = z.enum([
   "LANDING_PAGE_REVIEW",
   "ARCHITECTURE_SANITY_CHECK",
   "EXPERT_FACT_VERIFICATION",
+  "AI_VIDEO_REVIEW",
+  "SOFTWARE_PRODUCT_REVIEW",
+  "AI_WORKFLOW_REVIEW",
 ]);
 
 export type TaskTypeCode = z.infer<typeof TaskTypeCode>;
@@ -31,6 +34,27 @@ export const ExpertFactVerificationInputSchema = z.object({
   claim: z.string().min(5, "Claim to verify must be provided"),
   context: z.string().min(10, "Context surrounding the claim is required"),
   sources: z.array(z.string()).optional().default([]),
+});
+
+export const AiVideoReviewInputSchema = z.object({
+  video_url: z.string().url("Must be a valid video URL"),
+  generation_context: z.string().min(10, "Generation context / prompt must be at least 10 characters"),
+  intended_use: z.string().min(10, "Intended use must be at least 10 characters"),
+  specific_concerns: z.string().optional(),
+});
+
+export const SoftwareProductReviewInputSchema = z.object({
+  product_url: z.string().url("Must be a valid product or demo URL"),
+  product_summary: z.string().min(15, "Product summary must be at least 15 characters"),
+  target_users: z.string().min(10, "Target users description must be at least 10 characters"),
+  key_flows_to_test: z.array(z.string().min(5)).min(1, "At least one key flow must be specified"),
+});
+
+export const AiWorkflowReviewInputSchema = z.object({
+  workflow_summary: z.string().min(15, "Workflow summary must be at least 15 characters"),
+  steps: z.array(z.string().min(5)).min(1, "At least one workflow step is required"),
+  failure_modes_considered: z.array(z.string()).default([]),
+  expected_throughput: z.string().min(5, "Expected throughput / frequency is required"),
 });
 
 // Result schemas according to HUMAN_TASK_CATALOGUE.md and BUILD_SPEC.md
@@ -89,6 +113,78 @@ export const ExpertFactVerificationResultSchema = z.object({
   source_notes: z.string().optional(),
 });
 
+export const AiVideoReviewResultSchema = z.object({
+  verdict: z.enum(["client_ready", "minor_revisions", "needs_regeneration"]),
+  top_issues: z
+    .array(LandingPageIssueSchema)
+    .length(3, "Exactly 3 top issues are required"),
+  highest_impact_change: LandingPageHighestImpactChangeSchema,
+  visual_coherence_assessment: z
+    .string()
+    .min(20, "Visual coherence assessment must be at least 20 characters"),
+  motion_artifacts_assessment: z
+    .string()
+    .min(20, "Motion artifacts assessment must be at least 20 characters"),
+  client_readiness_assessment: z
+    .string()
+    .min(20, "Client readiness assessment must be at least 20 characters"),
+  overall_verdict: z
+    .string()
+    .min(20, "Overall verdict must be at least 20 characters"),
+  confidence: z
+    .number()
+    .min(0, "Confidence must be between 0.0 and 1.0")
+    .max(1, "Confidence must be between 0.0 and 1.0"),
+});
+
+export const SoftwareProductReviewResultSchema = z.object({
+  verdict: z.enum(["ready_to_ship", "needs_polish", "major_friction"]),
+  top_issues: z
+    .array(LandingPageIssueSchema)
+    .length(3, "Exactly 3 top issues are required"),
+  highest_impact_change: LandingPageHighestImpactChangeSchema,
+  ux_clarity_assessment: z
+    .string()
+    .min(20, "UX clarity assessment must be at least 20 characters"),
+  value_proposition_assessment: z
+    .string()
+    .min(20, "Value proposition assessment must be at least 20 characters"),
+  onboarding_friction_assessment: z
+    .string()
+    .min(20, "Onboarding friction assessment must be at least 20 characters"),
+  overall_verdict: z
+    .string()
+    .min(20, "Overall verdict must be at least 20 characters"),
+  confidence: z
+    .number()
+    .min(0, "Confidence must be between 0.0 and 1.0")
+    .max(1, "Confidence must be between 0.0 and 1.0"),
+});
+
+export const AiWorkflowReviewResultSchema = z.object({
+  verdict: z.enum(["production_ready", "needs_safeguards", "architecturally_flawed"]),
+  top_issues: z
+    .array(LandingPageIssueSchema)
+    .length(3, "Exactly 3 top issues are required"),
+  highest_impact_change: LandingPageHighestImpactChangeSchema,
+  reliability_assessment: z
+    .string()
+    .min(20, "Reliability assessment must be at least 20 characters"),
+  edge_case_handling_assessment: z
+    .string()
+    .min(20, "Edge case handling assessment must be at least 20 characters"),
+  human_in_the_loop_assessment: z
+    .string()
+    .min(20, "Human in the loop assessment must be at least 20 characters"),
+  overall_verdict: z
+    .string()
+    .min(20, "Overall verdict must be at least 20 characters"),
+  confidence: z
+    .number()
+    .min(0, "Confidence must be between 0.0 and 1.0")
+    .max(1, "Confidence must be between 0.0 and 1.0"),
+});
+
 // Helper to validate input payload based on task type
 export function validateTaskInput(taskType: string, payload: unknown) {
   switch (taskType) {
@@ -98,6 +194,12 @@ export function validateTaskInput(taskType: string, payload: unknown) {
       return ArchitectureSanityCheckInputSchema.safeParse(payload);
     case "EXPERT_FACT_VERIFICATION":
       return ExpertFactVerificationInputSchema.safeParse(payload);
+    case "AI_VIDEO_REVIEW":
+      return AiVideoReviewInputSchema.safeParse(payload);
+    case "SOFTWARE_PRODUCT_REVIEW":
+      return SoftwareProductReviewInputSchema.safeParse(payload);
+    case "AI_WORKFLOW_REVIEW":
+      return AiWorkflowReviewInputSchema.safeParse(payload);
     default:
       return {
         success: false as const,
@@ -121,6 +223,12 @@ export function validateTaskResult(taskType: string, result: unknown) {
       return ArchitectureSanityCheckResultSchema.safeParse(result);
     case "EXPERT_FACT_VERIFICATION":
       return ExpertFactVerificationResultSchema.safeParse(result);
+    case "AI_VIDEO_REVIEW":
+      return AiVideoReviewResultSchema.safeParse(result);
+    case "SOFTWARE_PRODUCT_REVIEW":
+      return SoftwareProductReviewResultSchema.safeParse(result);
+    case "AI_WORKFLOW_REVIEW":
+      return AiWorkflowReviewResultSchema.safeParse(result);
     default:
       return {
         success: false as const,

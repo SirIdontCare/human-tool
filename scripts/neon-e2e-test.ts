@@ -67,8 +67,8 @@ async function runFinalPreMCPNeonE2ETest() {
   console.log("\n[1/15] Verifying schema_migrations tracking in Neon...");
   const migRes = await rawPool.query("SELECT version, applied_at FROM schema_migrations ORDER BY version ASC");
   console.log("Applied migrations in Neon:", migRes.rows.map((r) => r.version));
-  if (migRes.rows.length < 6) {
-    throw new Error(`Expected at least 6 migrations in schema_migrations! Found: ${migRes.rows.length}`);
+  if (migRes.rows.length < 7) {
+    throw new Error(`Expected at least 7 migrations in schema_migrations! Found: ${migRes.rows.length}`);
   }
   if (!migRes.rows.some((r) => r.version.includes("004"))) {
     throw new Error("Migration 004 is missing from schema_migrations!");
@@ -79,7 +79,10 @@ async function runFinalPreMCPNeonE2ETest() {
   if (!migRes.rows.some((r) => r.version.includes("006"))) {
     throw new Error("Migration 006 is missing from schema_migrations!");
   }
-  console.log("✓ Migrations 004, 005, and 006 applied");
+  if (!migRes.rows.some((r) => r.version.includes("007"))) {
+    throw new Error("Migration 007 is missing from schema_migrations!");
+  }
+  console.log("✓ Migrations 004, 005, 006, and 007 applied");
 
   // ============================================================
   // [2/15] Schema invariants (005: quotes.agent_token_hash NOT NULL,
@@ -194,6 +197,114 @@ async function runFinalPreMCPNeonE2ETest() {
         verdict: "cannot_confirm",
         explanation: "No authoritative source corroborates this claim after review.",
         confidence: 0.71,
+      },
+      AI_VIDEO_REVIEW: {
+        verdict: "minor_revisions",
+        top_issues: [
+          {
+            issue: "Hand geometry deforms noticeably during camera rotation",
+            evidence: "Observed at 0:02-0:04: fingers merge into coffee mug during grip",
+            why_it_matters: "Breaks immersion and makes commercial advertisement look amateurish",
+            recommended_change: "Inpaint frame 45-75 with masked hand seed or crop to medium close-up",
+            severity: "high",
+          },
+          {
+            issue: "Background lighting shifts temperature abruptly at second 3",
+            evidence: "Color temperature shifts from 3200K warm tungsten to 5600K cool daylight",
+            why_it_matters: "Visual discontinuity creates perceptible flicker across scene",
+            recommended_change: "Apply temporal deflicker and color grade lock across all frames",
+            severity: "medium",
+          },
+          {
+            issue: "Motion blur on foreground actor is unnaturally uniform",
+            evidence: "Shutter speed simulation creates smearing without directionality",
+            why_it_matters: "Subtle uncanny valley artifact that distracts viewers",
+            recommended_change: "Reduce motion blur weight by 30% in generation parameters",
+            severity: "low",
+          },
+        ],
+        highest_impact_change: {
+          change: "Inpaint frames 45-75 with masked hand seed or crop to medium close-up",
+          rationale: "Resolving hand anatomy failure makes the shot immediately viable for client ad campaign",
+          expected_effect: "Elevates visual quality from rejected draft to client-ready hero video",
+        },
+        visual_coherence_assessment: "Subject consistency and environment texture quality are remarkably high throughout the clip.",
+        motion_artifacts_assessment: "Minor hand deformation and lighting shift are the only notable temporal artifacts detected.",
+        client_readiness_assessment: "Not ready for final broadcast delivery in current state; ready after hand inpainting.",
+        overall_verdict: "Strong generation with excellent cinematography that requires targeted frame inpainting before client handoff.",
+        confidence: 0.95,
+      },
+      SOFTWARE_PRODUCT_REVIEW: {
+        verdict: "needs_polish",
+        top_issues: [
+          {
+            issue: "Primary workspace dashboard lacks clear initial call to action",
+            evidence: "Empty state shows a blank grid with no guided onboarding or creation trigger",
+            why_it_matters: "First-time users experience decision fatigue and abandon within 30 seconds",
+            recommended_change: "Add an interactive 'Create First Workflow' template card in the center viewport",
+            severity: "high",
+          },
+          {
+            issue: "API key modal does not indicate scope permissions required",
+            evidence: "Input asks for 'API Key' without listing whether read-only or admin access is needed",
+            why_it_matters: "Security-conscious developers hesitate to provide unrestricted credentials",
+            recommended_change: "Add helper text specifying required IAM roles and link to documentation",
+            severity: "medium",
+          },
+          {
+            issue: "Task execution status latency indicator is missing",
+            evidence: "Clicking 'Run' does not show loading spinner for the first 800ms of dispatch",
+            why_it_matters: "Users double-click and cause redundant execution attempts",
+            recommended_change: "Immediately disable button and display an active pulse animation",
+            severity: "low",
+          },
+        ],
+        highest_impact_change: {
+          change: "Add an interactive template selector for new users on initial empty dashboard",
+          rationale: "Guiding the user directly to their first successful run increases activation by 50%",
+          expected_effect: "Expected to double day-1 activation rate for new developer signups",
+        },
+        ux_clarity_assessment: "Information architecture is logical, but the blank empty state creates onboarding friction.",
+        value_proposition_assessment: "Core value of autonomous capability is evident once a workflow runs successfully.",
+        onboarding_friction_assessment: "Connecting credentials and launching the first task requires too many non-obvious steps.",
+        overall_verdict: "High technical capability that needs streamlined first-run onboarding before public marketing launch.",
+        confidence: 0.95,
+      },
+      AI_WORKFLOW_REVIEW: {
+        verdict: "needs_safeguards",
+        top_issues: [
+          {
+            issue: "Unbounded retry loop on model parse failure risks infinite spend",
+            evidence: "Workflow config sets retry count to 10 with exponential backoff on 429 and parse errors",
+            why_it_matters: "A persistent malformed input could exhaust OpenAI API quota in minutes",
+            recommended_change: "Cap retries at 3 and route unparseable documents to human verification queue",
+            severity: "high",
+          },
+          {
+            issue: "Missing idempotency key on database insert stage",
+            evidence: "Webhook re-deliveries from Stripe will insert duplicate invoice records",
+            why_it_matters: "Financial ledger corruption requiring manual database remediation",
+            recommended_change: "Use event ID as unique idempotency constraint on database insert query",
+            severity: "high",
+          },
+          {
+            issue: "Confidence score threshold of 0.70 is too permissive for financial data",
+            evidence: "Field extraction confidence is accepted down to 0.70 without human escalation",
+            why_it_matters: "Will allow 3-5% incorrect invoice totals into automated accounting flow",
+            recommended_change: "Raise human escalation threshold to 0.90 for invoice dollar amounts",
+            severity: "medium",
+          },
+        ],
+        highest_impact_change: {
+          change: "Cap model retries at 3 and route parse failures to human verification queue",
+          rationale: "Eliminates cascading cost risk while ensuring zero data loss on complex inputs",
+          expected_effect: "Protects pipeline budget and guarantees 100% data completion rate",
+        },
+        reliability_assessment: "Pipeline architecture is sound but lacks necessary boundary safeguards against model failures.",
+        edge_case_handling_assessment: "Malformed JSON and burst rate limits are not currently handled defensively.",
+        human_in_the_loop_assessment: "Escalation threshold is too loose; tightening it will prevent automated financial errors.",
+        overall_verdict: "Promising automation architecture that requires three concrete safety guardrails before production deployment.",
+        confidence: 0.97,
       },
     };
     const sample = sampleByCode[String(row.code)];

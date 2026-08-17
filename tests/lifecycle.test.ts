@@ -688,6 +688,114 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
           explanation: "No authoritative source corroborates this claim after review.",
           confidence: 0.71,
         },
+        AI_VIDEO_REVIEW: {
+          verdict: "minor_revisions",
+          top_issues: [
+            {
+              issue: "Hand geometry deforms noticeably during camera rotation",
+              evidence: "Observed at 0:02-0:04: fingers merge into coffee mug during grip",
+              why_it_matters: "Breaks immersion and makes commercial advertisement look amateurish",
+              recommended_change: "Inpaint frame 45-75 with masked hand seed or crop to medium close-up",
+              severity: "high",
+            },
+            {
+              issue: "Background lighting shifts temperature abruptly at second 3",
+              evidence: "Color temperature shifts from 3200K warm tungsten to 5600K cool daylight",
+              why_it_matters: "Visual discontinuity creates perceptible flicker across scene",
+              recommended_change: "Apply temporal deflicker and color grade lock across all frames",
+              severity: "medium",
+            },
+            {
+              issue: "Motion blur on foreground actor is unnaturally uniform",
+              evidence: "Shutter speed simulation creates smearing without directionality",
+              why_it_matters: "Subtle uncanny valley artifact that distracts viewers",
+              recommended_change: "Reduce motion blur weight by 30% in generation parameters",
+              severity: "low",
+            },
+          ],
+          highest_impact_change: {
+            change: "Inpaint frames 45-75 with masked hand seed or crop to medium close-up",
+            rationale: "Resolving hand anatomy failure makes the shot immediately viable for client ad campaign",
+            expected_effect: "Elevates visual quality from rejected draft to client-ready hero video",
+          },
+          visual_coherence_assessment: "Subject consistency and environment texture quality are remarkably high throughout the clip.",
+          motion_artifacts_assessment: "Minor hand deformation and lighting shift are the only notable temporal artifacts detected.",
+          client_readiness_assessment: "Not ready for final broadcast delivery in current state; ready after hand inpainting.",
+          overall_verdict: "Strong generation with excellent cinematography that requires targeted frame inpainting before client handoff.",
+          confidence: 0.95,
+        },
+        SOFTWARE_PRODUCT_REVIEW: {
+          verdict: "needs_polish",
+          top_issues: [
+            {
+              issue: "Primary workspace dashboard lacks clear initial call to action",
+              evidence: "Empty state shows a blank grid with no guided onboarding or creation trigger",
+              why_it_matters: "First-time users experience decision fatigue and abandon within 30 seconds",
+              recommended_change: "Add an interactive 'Create First Workflow' template card in the center viewport",
+              severity: "high",
+            },
+            {
+              issue: "API key modal does not indicate scope permissions required",
+              evidence: "Input asks for 'API Key' without listing whether read-only or admin access is needed",
+              why_it_matters: "Security-conscious developers hesitate to provide unrestricted credentials",
+              recommended_change: "Add helper text specifying required IAM roles and link to documentation",
+              severity: "medium",
+            },
+            {
+              issue: "Task execution status latency indicator is missing",
+              evidence: "Clicking 'Run' does not show loading spinner for the first 800ms of dispatch",
+              why_it_matters: "Users double-click and cause redundant execution attempts",
+              recommended_change: "Immediately disable button and display an active pulse animation",
+              severity: "low",
+            },
+          ],
+          highest_impact_change: {
+            change: "Add an interactive template selector for new users on initial empty dashboard",
+            rationale: "Guiding the user directly to their first successful run increases activation by 50%",
+            expected_effect: "Expected to double day-1 activation rate for new developer signups",
+          },
+          ux_clarity_assessment: "Information architecture is logical, but the blank empty state creates onboarding friction.",
+          value_proposition_assessment: "Core value of autonomous capability is evident once a workflow runs successfully.",
+          onboarding_friction_assessment: "Connecting credentials and launching the first task requires too many non-obvious steps.",
+          overall_verdict: "High technical capability that needs streamlined first-run onboarding before public marketing launch.",
+          confidence: 0.95,
+        },
+        AI_WORKFLOW_REVIEW: {
+          verdict: "needs_safeguards",
+          top_issues: [
+            {
+              issue: "Unbounded retry loop on model parse failure risks infinite spend",
+              evidence: "Workflow config sets retry count to 10 with exponential backoff on 429 and parse errors",
+              why_it_matters: "A persistent malformed input could exhaust OpenAI API quota in minutes",
+              recommended_change: "Cap retries at 3 and route unparseable documents to human verification queue",
+              severity: "high",
+            },
+            {
+              issue: "Missing idempotency key on database insert stage",
+              evidence: "Webhook re-deliveries from Stripe will insert duplicate invoice records",
+              why_it_matters: "Financial ledger corruption requiring manual database remediation",
+              recommended_change: "Use event ID as unique idempotency constraint on database insert query",
+              severity: "high",
+            },
+            {
+              issue: "Confidence score threshold of 0.70 is too permissive for financial data",
+              evidence: "Field extraction confidence is accepted down to 0.70 without human escalation",
+              why_it_matters: "Will allow 3-5% incorrect invoice totals into automated accounting flow",
+              recommended_change: "Raise human escalation threshold to 0.90 for invoice dollar amounts",
+              severity: "medium",
+            },
+          ],
+          highest_impact_change: {
+            change: "Cap model retries at 3 and route parse failures to human verification queue",
+            rationale: "Eliminates cascading cost risk while ensuring zero data loss on complex inputs",
+            expected_effect: "Protects pipeline budget and guarantees 100% data completion rate",
+          },
+          reliability_assessment: "Pipeline architecture is sound but lacks necessary boundary safeguards against model failures.",
+          edge_case_handling_assessment: "Malformed JSON and burst rate limits are not currently handled defensively.",
+          human_in_the_loop_assessment: "Escalation threshold is too loose; tightening it will prevent automated financial errors.",
+          overall_verdict: "Promising automation architecture that requires three concrete safety guardrails before production deployment.",
+          confidence: 0.97,
+        },
       };
       const valid = validateTaskResult(code, validSamples[code]);
       expect(valid.success, `published-schema-valid payload rejected for ${code}`).toBe(true);
@@ -733,6 +841,18 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
           { verdict: "true", explanation: "Too short", confidence: 0.9 }, // minLength 10
           { verdict: "true", explanation: "A sufficiently long explanation for the fact check verdict.", confidence: 2.0 }, // maximum 1
         ],
+        AI_VIDEO_REVIEW: [
+          { verdict: "invalid_verdict", top_issues: [], confidence: 0.95 },
+          { verdict: "client_ready", top_issues: [], confidence: 0.95 },
+        ],
+        SOFTWARE_PRODUCT_REVIEW: [
+          { verdict: "invalid_verdict", top_issues: [], confidence: 0.95 },
+          { verdict: "ready_to_ship", top_issues: [], confidence: 0.95 },
+        ],
+        AI_WORKFLOW_REVIEW: [
+          { verdict: "invalid_verdict", top_issues: [], confidence: 0.95 },
+          { verdict: "production_ready", top_issues: [], confidence: 0.95 },
+        ],
       };
       for (const [i, sample] of (violationSamples[code] || []).entries()) {
         const invalid = validateTaskResult(code, sample);
@@ -749,6 +869,80 @@ describe("Sprint 1.2 Pre-MCP Security Patch Verification Suite", () => {
     expect(canTransition("OFFERED", "COMPLETED")).toBe(false);
     expect(canTransition("COMPLETED", "IN_PROGRESS")).toBe(false);
     expect(VALID_TRANSITIONS.COMPLETED).toEqual([]);
+  });
+
+  // 26. Founder Human Node execution lifecycle
+  it("should route AI_VIDEO_REVIEW, SOFTWARE_PRODUCT_REVIEW, and AI_WORKFLOW_REVIEW to the founder node (w_founder)", async () => {
+    const quoteRes = await requestQuote({
+      task_type: "AI_VIDEO_REVIEW",
+      input_payload: {
+        video_url: "https://example.com/cinematic-clip.mp4",
+        generation_context: "Sora 2.0 cinematic city reveal with camera truck in",
+        intended_use: "Commercial hero landing video",
+      },
+    });
+
+    expect(quoteRes.customer_price_usd).toBe(39.0);
+    expect(quoteRes.required_capability).toBe("AI_VIDEO_REVIEW");
+
+    const taskRes = await createTaskFromQuote({ quote_id: quoteRes.quote_id }, "", quoteRes.agent_token);
+    expect(taskRes.task_type).toBe("AI_VIDEO_REVIEW");
+
+    const offers = await db.getOffersForTask(taskRes.task_id);
+    expect(offers.some((o) => o.worker_id === "w_founder")).toBe(true);
+
+    const founderToken = (await db.issueWorkerOfferToken(taskRes.task_id, "w_founder")).token!;
+    await acceptTask(taskRes.task_id, { worker_id: "w_founder" }, founderToken);
+    await startTask(taskRes.task_id, { worker_id: "w_founder" }, founderToken);
+
+    const resultPayload = {
+      verdict: "minor_revisions" as const,
+      top_issues: [
+        {
+          issue: "Hand geometry deforms noticeably during camera rotation",
+          evidence: "Observed at 0:02-0:04: fingers merge into coffee mug during grip",
+          why_it_matters: "Breaks immersion and makes commercial advertisement look amateurish",
+          recommended_change: "Inpaint frame 45-75 with masked hand seed or crop to medium close-up",
+          severity: "high" as const,
+        },
+        {
+          issue: "Background lighting shifts temperature abruptly at second 3",
+          evidence: "Color temperature shifts from 3200K warm tungsten to 5600K cool daylight",
+          why_it_matters: "Visual discontinuity creates perceptible flicker across scene",
+          recommended_change: "Apply temporal deflicker and color grade lock across all frames",
+          severity: "medium" as const,
+        },
+        {
+          issue: "Motion blur on foreground actor is unnaturally uniform",
+          evidence: "Shutter speed simulation creates smearing without directionality",
+          why_it_matters: "Subtle uncanny valley artifact that distracts viewers",
+          recommended_change: "Reduce motion blur weight by 30% in generation parameters",
+          severity: "low" as const,
+        },
+      ],
+      highest_impact_change: {
+        change: "Inpaint frames 45-75 with masked hand seed or crop to medium close-up",
+        rationale: "Resolving hand anatomy failure makes the shot immediately viable for client ad campaign",
+        expected_effect: "Elevates visual quality from rejected draft to client-ready hero video",
+      },
+      visual_coherence_assessment: "Subject consistency and environment texture quality are remarkably high throughout the clip.",
+      motion_artifacts_assessment: "Minor hand deformation and lighting shift are the only notable temporal artifacts detected.",
+      client_readiness_assessment: "Not ready for final broadcast delivery in current state; ready after hand inpainting.",
+      overall_verdict: "Strong generation with excellent cinematography that requires targeted frame inpainting before client handoff.",
+      confidence: 0.95,
+    };
+
+    const submitRes = await submitTaskResult(
+      taskRes.task_id,
+      { worker_id: "w_founder", result_payload: resultPayload },
+      founderToken
+    );
+    expect(submitRes.status).toBe("COMPLETED");
+
+    const fetchedResult = await getTaskResult(taskRes.task_id, quoteRes.agent_token);
+    expect(fetchedResult.status).toBe("COMPLETED");
+    expect(fetchedResult.result.verdict).toBe("minor_revisions");
+    expect(fetchedResult.result.top_issues).toHaveLength(3);
   });
 });
 

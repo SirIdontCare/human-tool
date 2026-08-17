@@ -55,18 +55,21 @@ export function registerHumanCapabilityTools(server: McpServer) {
     "Request a deterministic quote and quote-scoped capability credential (agent_token) for capability-matched human work. " +
       "Use when human judgment would materially improve reliability, AI confidence is insufficient, " +
       "independent verification is valuable, or the task requires human capability the model cannot reliably provide. " +
-      "Supported task_types: LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, EXPERT_FACT_VERIFICATION.",
+      "Supported task_types: LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, EXPERT_FACT_VERIFICATION, AI_VIDEO_REVIEW, SOFTWARE_PRODUCT_REVIEW, AI_WORKFLOW_REVIEW.",
     {
       task_type: z
         .enum([
           "LANDING_PAGE_REVIEW",
           "ARCHITECTURE_SANITY_CHECK",
           "EXPERT_FACT_VERIFICATION",
+          "AI_VIDEO_REVIEW",
+          "SOFTWARE_PRODUCT_REVIEW",
+          "AI_WORKFLOW_REVIEW",
         ])
-        .describe("The canonical task type code from the catalogue: LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, or EXPERT_FACT_VERIFICATION"),
+        .describe("The canonical task type code from the catalogue: LANDING_PAGE_REVIEW, ARCHITECTURE_SANITY_CHECK, EXPERT_FACT_VERIFICATION, AI_VIDEO_REVIEW, SOFTWARE_PRODUCT_REVIEW, or AI_WORKFLOW_REVIEW"),
       input_payload: z
         .record(z.unknown())
-        .describe("Structured input payload meeting the schema of the specified task_type (e.g. for LANDING_PAGE_REVIEW: { url, target_audience }; for ARCHITECTURE_SANITY_CHECK: { architecture_summary, components, expected_scale }; for EXPERT_FACT_VERIFICATION: { claim, context })"),
+        .describe("Structured input payload meeting the schema of the specified task_type"),
     },
     async ({ task_type, input_payload }) => {
       try {

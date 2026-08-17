@@ -32,13 +32,16 @@ AI Agent
 
 ---
 
-## 2. Supported Task Catalogue (Sprint 1)
+## 2. Supported Task Catalogue
 
 | Task Code | Title | Customer Price | Expert Payout | SLA | Risk Level | Output Structure |
 |---|---|---|---|---|---|---|
-| `LANDING_PAGE_REVIEW` | Landing Page Conversion Review | $39.00 | $25.00 | 30 min | `LOW` | `top_issues`, `highest_impact_change`, `conversion_blockers`, `confidence` |
+| `LANDING_PAGE_REVIEW` | Landing Page Conversion Review | $39.00 | $25.00 | 30 min | `LOW` | `top_issues` (3), `highest_impact_change`, assessments, `overall_verdict`, `confidence` |
 | `ARCHITECTURE_SANITY_CHECK` | Architecture Sanity Check | $69.00 | $45.00 | 60 min | `MEDIUM` | `verdict`, `critical_issues`, `recommended_changes`, `scaling_risks`, `confidence` |
 | `EXPERT_FACT_VERIFICATION` | Expert Fact Verification | $29.00 | $18.00 | 30 min | `LOW` | `verdict`, `explanation`, `confidence`, `source_notes` |
+| `AI_VIDEO_REVIEW` | AI Video Review & Quality Assessment | $39.00 | $25.00 | 30 min | `LOW` | `verdict`, `top_issues` (3), `highest_impact_change`, assessments, `overall_verdict`, `confidence` |
+| `SOFTWARE_PRODUCT_REVIEW` | Software Product & Demo Review | $39.00 | $25.00 | 30 min | `LOW` | `verdict`, `top_issues` (3), `highest_impact_change`, assessments, `overall_verdict`, `confidence` |
+| `AI_WORKFLOW_REVIEW` | AI & Automation Workflow Review | $39.00 | $25.00 | 30 min | `LOW` | `verdict`, `top_issues` (3), `highest_impact_change`, assessments, `overall_verdict`, `confidence` |
 
 ---
 
@@ -206,7 +209,7 @@ AI Agent
 
 #### 1. `quote_human`
 Request a deterministic quote and quote-scoped capability credential (`agent_token`) for capability-matched human work.
-- **Inputs:** `task_type` (`LANDING_PAGE_REVIEW` | `ARCHITECTURE_SANITY_CHECK` | `EXPERT_FACT_VERIFICATION`), `input_payload` (object).
+- **Inputs:** `task_type` (`LANDING_PAGE_REVIEW` | `ARCHITECTURE_SANITY_CHECK` | `EXPERT_FACT_VERIFICATION` | `AI_VIDEO_REVIEW` | `SOFTWARE_PRODUCT_REVIEW` | `AI_WORKFLOW_REVIEW`), `input_payload` (object).
 - **Outputs:** `quote_id`, `task_type`, `customer_price_usd`, `estimated_minutes`, `expires_at`, `agent_token`, `required_capability`.
 
 #### 2. `call_human`
