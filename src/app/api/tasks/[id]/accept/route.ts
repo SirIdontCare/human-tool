@@ -11,7 +11,7 @@ export async function POST(
     const resolvedParams = await params;
     const taskId = resolvedParams.id;
 
-    const body = await request.json();
+    const body = await request.json().catch(() => ({}));
     const parseResult = AcceptTaskRequestSchema.safeParse(body);
     if (!parseResult.success) {
       return NextResponse.json(
@@ -22,14 +22,19 @@ export async function POST(
 
     const { worker_id } = parseResult.data;
 
+    // Check token from body, header, or query
+    const headerToken = request.headers.get("x-worker-token") ||
+      request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+    const workerToken = (body as any).token || (body as any).worker_token || headerToken || undefined;
+
     // Verify worker exists
     const worker = await db.getWorker(worker_id);
     if (!worker) {
       return NextResponse.json({ error: `Worker '${worker_id}' not found` }, { status: 404 });
     }
 
-    // Attempt atomic acceptance
-    const acceptRes = await db.acceptTask(taskId, worker_id);
+    // Attempt atomic acceptance with capability and token checks
+    const acceptRes = await db.acceptTask(taskId, worker_id, workerToken);
     if (!acceptRes.success || !acceptRes.task) {
       return NextResponse.json(
         { error: acceptRes.error || "Failed to accept task" },

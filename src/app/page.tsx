@@ -122,7 +122,9 @@ export default function AgentSandboxPage() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`/api/tasks/${taskData.task_id}/result`);
+      const res = await fetch(`/api/tasks/${taskData.task_id}/result`, {
+        headers: taskData.agent_token ? { Authorization: `Bearer ${taskData.agent_token}` } : {},
+      });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || data.message || "Failed to retrieve result");
 
@@ -169,17 +171,20 @@ export default function AgentSandboxPage() {
       setTaskData(t);
 
       // 3. Human Accept
+      const primaryOffer = t.offers?.[0];
       const workerId =
-        selectedType === "LANDING_PAGE_REVIEW"
+        primaryOffer?.worker_id ||
+        (selectedType === "LANDING_PAGE_REVIEW"
           ? "w_alex_ux"
           : selectedType === "ARCHITECTURE_SANITY_CHECK"
           ? "w_sam_arch"
-          : "w_elena_fact";
+          : "w_elena_fact");
+      const workerToken = primaryOffer?.worker_token || "";
 
       const aRes = await fetch(`/api/tasks/${t.task_id}/accept`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_id: workerId }),
+        body: JSON.stringify({ worker_id: workerId, token: workerToken }),
       });
       if (!aRes.ok) throw new Error("Accept failed");
 
@@ -187,7 +192,7 @@ export default function AgentSandboxPage() {
       await fetch(`/api/tasks/${t.task_id}/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_id: workerId }),
+        body: JSON.stringify({ worker_id: workerId, token: workerToken }),
       });
 
       // 5. Submit Mock Structured Result
@@ -227,12 +232,14 @@ export default function AgentSandboxPage() {
       const sRes = await fetch(`/api/tasks/${t.task_id}/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_id: workerId, result_payload: mockResult }),
+        body: JSON.stringify({ worker_id: workerId, token: workerToken, result_payload: mockResult }),
       });
       if (!sRes.ok) throw new Error("Submit failed");
 
       // 6. Retrieve
-      const rRes = await fetch(`/api/tasks/${t.task_id}/result`);
+      const rRes = await fetch(`/api/tasks/${t.task_id}/result`, {
+        headers: t.agent_token ? { Authorization: `Bearer ${t.agent_token}` } : {},
+      });
       const r = await rRes.json();
       if (!rRes.ok) throw new Error(r.error);
 

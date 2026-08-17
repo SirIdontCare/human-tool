@@ -2,10 +2,10 @@ import { Pool } from "pg";
 import { loadEnvConfig } from "@next/env";
 import { TASK_CATALOGUE } from "../lib/catalogue";
 import { TaskStatus, validateTransition } from "../lib/state-machine";
+import { generateToken, hashToken, verifyTokenHash } from "../lib/auth";
 
 // Ensure environment variables (.env.local, .env, etc.) are loaded
 loadEnvConfig(process.cwd());
-
 
 // Types
 export interface TaskTypeRow {
@@ -58,6 +58,7 @@ export interface TaskRow {
   status: TaskStatus;
   input_payload: Record<string, unknown>;
   assigned_worker_id: string | null;
+  agent_token_hash: string;
   created_at: string;
   updated_at: string;
 }
@@ -66,6 +67,7 @@ export interface TaskOfferRow {
   id: string;
   task_id: string;
   worker_id: string;
+  worker_token_hash: string;
   status: string;
   offered_at: string;
   responded_at: string | null;
@@ -89,7 +91,7 @@ export interface EventRow {
   created_at: string;
 }
 
-// In-Memory Store for testing or when DATABASE_URL is not set
+// In-Memory Store for isolated testing or fallback
 class InMemoryStore {
   taskTypes = new Map<string, TaskTypeRow>();
   workers = new Map<string, WorkerRow>();
@@ -195,7 +197,6 @@ export const db = {
       const res = await pool.query(sql, params);
       return res.rows;
     }
-    // Fallback: simple logger if raw query is run without Postgres
     return [];
   },
 
@@ -230,7 +231,7 @@ export const db = {
     return memStore.taskTypes.get(code) || null;
   },
 
-  // Workers
+  // Workers & Capabilities
   async getWorkers(): Promise<WorkerRow[]> {
     const pool = getPgPool();
     if (pool) {
@@ -249,13 +250,30 @@ export const db = {
     return memStore.workers.get(id) || null;
   },
 
+  async verifyWorkerCapability(workerId: string, capabilityCode: string): Promise<boolean> {
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(
+        `SELECT 1 FROM worker_capabilities 
+         WHERE worker_id = $1 AND capability_code = $2 AND status = 'VERIFIED' AND score > 0
+         LIMIT 1`,
+        [workerId, capabilityCode]
+      );
+      return res.rows.length > 0;
+    }
+    const cap = Array.from(memStore.workerCapabilities.values()).find(
+      (c) => c.worker_id === workerId && c.capability_code === capabilityCode && c.status === "VERIFIED" && c.score > 0
+    );
+    return Boolean(cap);
+  },
+
   async getWorkersByCapability(capabilityCode: string): Promise<WorkerRow[]> {
     const pool = getPgPool();
     if (pool) {
       const res = await pool.query(
         `SELECT w.* FROM workers w
          JOIN worker_capabilities wc ON wc.worker_id = w.id
-         WHERE wc.capability_code = $1 AND w.status = 'ACTIVE'
+         WHERE wc.capability_code = $1 AND w.status = 'ACTIVE' AND wc.status = 'VERIFIED'
          ORDER BY wc.score DESC`,
         [capabilityCode]
       );
@@ -330,36 +348,148 @@ export const db = {
     return memStore.quotes.get(id) || null;
   },
 
-  // Tasks
+  // Tasks (Idempotent & Auth Token Generation)
+  async getTaskByQuoteId(quoteId: string): Promise<TaskRow | null> {
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(`SELECT * FROM tasks WHERE quote_id = $1 LIMIT 1`, [quoteId]);
+      if (res.rows.length === 0) return null;
+      return res.rows[0];
+    }
+    return Array.from(memStore.tasks.values()).find((t) => t.quote_id === quoteId) || null;
+  },
+
   async createTask(params: {
     id: string;
     quote_id: string;
     task_type_id: string;
     input_payload: Record<string, unknown>;
-  }): Promise<TaskRow> {
+  }): Promise<{ task: TaskRow; agent_token: string; offers: Array<{ worker_id: string; worker_token: string; offer_id: string }>; is_existing: boolean }> {
     const pool = getPgPool();
     const now = new Date().toISOString();
-    const row: TaskRow = {
+
+    // Check for existing task for idempotent return
+    const existing = await this.getTaskByQuoteId(params.quote_id);
+    if (existing) {
+      return {
+        task: existing,
+        agent_token: "", // not re-exposed on idempotent read unless requested
+        offers: [],
+        is_existing: true,
+      };
+    }
+
+    const agentToken = generateToken("atk");
+    const agentTokenHash = hashToken(agentToken);
+
+    const taskRow: TaskRow = {
       id: params.id,
       quote_id: params.quote_id,
       task_type_id: params.task_type_id,
-      status: "OFFERED", // Created and immediately offered to qualified workers
+      status: "OFFERED",
       input_payload: params.input_payload,
       assigned_worker_id: null,
+      agent_token_hash: agentTokenHash,
       created_at: now,
       updated_at: now,
     };
 
+    // Find qualified workers
+    const taskType = await this.getTaskType(params.task_type_id);
+    const capability = taskType?.required_capability || "";
+    const qualifiedWorkers = await this.getWorkersByCapability(capability);
+
+    const offers: Array<{ worker_id: string; worker_token: string; offer_id: string }> = [];
+
     if (pool) {
-      await pool.query(
-        `INSERT INTO tasks (id, quote_id, task_type_id, status, input_payload, assigned_worker_id, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [row.id, row.quote_id, row.task_type_id, row.status, JSON.stringify(row.input_payload), null, row.created_at, row.updated_at]
-      );
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+
+        // Insert task with UNIQUE(quote_id) enforcement
+        const taskInsert = await client.query(
+          `INSERT INTO tasks (id, quote_id, task_type_id, status, input_payload, assigned_worker_id, agent_token_hash, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ON CONFLICT (quote_id) DO NOTHING
+           RETURNING *`,
+          [
+            taskRow.id,
+            taskRow.quote_id,
+            taskRow.task_type_id,
+            taskRow.status,
+            JSON.stringify(taskRow.input_payload),
+            null,
+            taskRow.agent_token_hash,
+            taskRow.created_at,
+            taskRow.updated_at,
+          ]
+        );
+
+        // If duplicate conflict occurred concurrently, fetch and return existing
+        if (taskInsert.rows.length === 0) {
+          await client.query("ROLLBACK");
+          const conflictTask = await this.getTaskByQuoteId(params.quote_id);
+          return {
+            task: conflictTask!,
+            agent_token: "",
+            offers: [],
+            is_existing: true,
+          };
+        }
+
+        // Insert task offers for each qualified worker
+        for (const worker of qualifiedWorkers) {
+          const workerToken = generateToken("otk");
+          const workerTokenHash = hashToken(workerToken);
+          const offerId = `off_${taskRow.id}_${worker.id}`;
+
+          await client.query(
+            `INSERT INTO task_offers (id, task_id, worker_id, worker_token_hash, status, offered_at)
+             VALUES ($1, $2, $3, $4, 'OFFERED', $5)
+             ON CONFLICT (task_id, worker_id) DO NOTHING`,
+            [offerId, taskRow.id, worker.id, workerTokenHash, now]
+          );
+
+          offers.push({ worker_id: worker.id, worker_token: workerToken, offer_id: offerId });
+        }
+
+        await client.query("COMMIT");
+        return { task: taskInsert.rows[0], agent_token: agentToken, offers, is_existing: false };
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
     } else {
-      memStore.tasks.set(row.id, row);
+      // In-Memory atomic insertion
+      if (memStore.tasks.has(taskRow.id) || Array.from(memStore.tasks.values()).some((t) => t.quote_id === taskRow.quote_id)) {
+        const conflictTask = Array.from(memStore.tasks.values()).find((t) => t.quote_id === taskRow.quote_id);
+        return { task: conflictTask!, agent_token: "", offers: [], is_existing: true };
+      }
+
+      memStore.tasks.set(taskRow.id, taskRow);
+
+      for (const worker of qualifiedWorkers) {
+        const workerToken = generateToken("otk");
+        const workerTokenHash = hashToken(workerToken);
+        const offerId = `off_${taskRow.id}_${worker.id}`;
+
+        const offerRow: TaskOfferRow = {
+          id: offerId,
+          task_id: taskRow.id,
+          worker_id: worker.id,
+          worker_token_hash: workerTokenHash,
+          status: "OFFERED",
+          offered_at: now,
+          responded_at: null,
+        };
+        memStore.taskOffers.set(`${taskRow.id}_${worker.id}`, offerRow);
+        offers.push({ worker_id: worker.id, worker_token: workerToken, offer_id: offerId });
+      }
+
+      return { task: taskRow, agent_token: agentToken, offers, is_existing: false };
     }
-    return row;
   },
 
   async getTask(id: string): Promise<TaskRow | null> {
@@ -372,81 +502,147 @@ export const db = {
     return memStore.tasks.get(id) || null;
   },
 
-  // Task Acceptance (Atomic concurrency safe)
-  async acceptTask(taskId: string, workerId: string): Promise<{ success: boolean; task?: TaskRow; error?: string; code?: number }> {
+  // Token Verification
+  async verifyAgentToken(taskId: string, agentToken: string): Promise<boolean> {
+    if (!agentToken) return false;
+    const task = await this.getTask(taskId);
+    if (!task || !task.agent_token_hash) return false;
+    return verifyTokenHash(agentToken, task.agent_token_hash);
+  },
+
+  async verifyWorkerToken(taskId: string, workerId: string, workerToken: string): Promise<boolean> {
+    if (!workerToken) return false;
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(
+        `SELECT worker_token_hash FROM task_offers WHERE task_id = $1 AND worker_id = $2 LIMIT 1`,
+        [taskId, workerId]
+      );
+      if (res.rows.length === 0) return false;
+      return verifyTokenHash(workerToken, res.rows[0].worker_token_hash);
+    }
+    const offer = memStore.taskOffers.get(`${taskId}_${workerId}`) ||
+                  Array.from(memStore.taskOffers.values()).find((o) => o.task_id === taskId && o.worker_id === workerId);
+    if (!offer) return false;
+    return verifyTokenHash(workerToken, offer.worker_token_hash);
+  },
+
+  async getOffersForTask(taskId: string): Promise<TaskOfferRow[]> {
+    const pool = getPgPool();
+    if (pool) {
+      const res = await pool.query(`SELECT * FROM task_offers WHERE task_id = $1 ORDER BY offered_at ASC`, [taskId]);
+      return res.rows;
+    }
+    return Array.from(memStore.taskOffers.values()).filter((o) => o.task_id === taskId);
+  },
+
+  // Task Acceptance (Capability Verified, Token Authenticated, Atomic Concurrency Safe)
+  async acceptTask(
+    taskId: string,
+    workerId: string,
+    workerToken?: string
+  ): Promise<{ success: boolean; task?: TaskRow; error?: string; code?: number }> {
     const pool = getPgPool();
     const now = new Date().toISOString();
 
+    const task = await this.getTask(taskId);
+    if (!task) {
+      return { success: false, error: `Task '${taskId}' not found`, code: 404 };
+    }
+
+    // 1. Verify Worker Capability
+    const taskType = await this.getTaskType(task.task_type_id);
+    const hasCapability = await this.verifyWorkerCapability(workerId, taskType?.required_capability || "");
+    if (!hasCapability) {
+      return {
+        success: false,
+        error: `Worker '${workerId}' does not possess the required verified capability: '${taskType?.required_capability}'`,
+        code: 403,
+      };
+    }
+
+    // 2. Verify Worker Offer Token if token auth is provided
+    if (workerToken) {
+      const validToken = await this.verifyWorkerToken(taskId, workerId, workerToken);
+      if (!validToken) {
+        return { success: false, error: "Invalid worker offer token", code: 401 };
+      }
+    }
+
     if (pool) {
-      // Atomic update in Postgres
+      // 3. Atomic state transition in PostgreSQL
       const res = await pool.query(
         `UPDATE tasks
          SET status = 'ACCEPTED', assigned_worker_id = $1, updated_at = $2
-         WHERE id = $3 AND status IN ('CREATED', 'OFFERED') AND assigned_worker_id IS NULL
+         WHERE id = $3 AND status = 'OFFERED' AND assigned_worker_id IS NULL
          RETURNING *`,
         [workerId, now, taskId]
       );
 
       if (res.rows.length === 0) {
-        // Find why it failed
         const existing = await pool.query(`SELECT * FROM tasks WHERE id = $1`, [taskId]);
-        if (existing.rows.length === 0) {
-          return { success: false, error: `Task ${taskId} not found`, code: 404 };
-        }
+        if (existing.rows.length === 0) return { success: false, error: `Task ${taskId} not found`, code: 404 };
         const t = existing.rows[0];
         if (t.assigned_worker_id && t.assigned_worker_id !== workerId) {
           return { success: false, error: "Task already accepted by another worker", code: 409 };
         }
-        return { success: false, error: `Task cannot be accepted in status '${t.status}'`, code: 400 };
+        return { success: false, error: `Task cannot be accepted from status '${t.status}'`, code: 400 };
       }
 
-      // Record offer acceptance
+      // Update existing offer row
       await pool.query(
-        `INSERT INTO task_offers (id, task_id, worker_id, status, offered_at, responded_at)
-         VALUES ($1, $2, $3, 'ACCEPTED', $4, $4)
-         ON CONFLICT (id) DO UPDATE SET status = 'ACCEPTED', responded_at = $4`,
-        [`off_${taskId}_${workerId}`, taskId, workerId, now]
+        `UPDATE task_offers
+         SET status = 'ACCEPTED', responded_at = $1
+         WHERE task_id = $2 AND worker_id = $3`,
+        [now, taskId, workerId]
       );
 
       return { success: true, task: res.rows[0] };
     } else {
-      // In-Memory atomic check
-      const task = memStore.tasks.get(taskId);
-      if (!task) {
-        return { success: false, error: `Task ${taskId} not found`, code: 404 };
-      }
+      // In-Memory atomic transition
+      const memTask = memStore.tasks.get(taskId);
+      if (!memTask) return { success: false, error: `Task ${taskId} not found`, code: 404 };
 
-      if (task.assigned_worker_id && task.assigned_worker_id !== workerId) {
+      if (memTask.assigned_worker_id && memTask.assigned_worker_id !== workerId) {
         return { success: false, error: "Task already accepted by another worker", code: 409 };
       }
 
-      if (!["CREATED", "OFFERED"].includes(task.status)) {
-        return { success: false, error: `Task cannot be accepted in status '${task.status}'`, code: 400 };
+      if (memTask.status !== "OFFERED") {
+        return { success: false, error: `Task cannot be accepted from status '${memTask.status}'`, code: 400 };
       }
 
-      validateTransition(task.status, "ACCEPTED");
+      validateTransition(memTask.status, "ACCEPTED");
 
-      task.status = "ACCEPTED";
-      task.assigned_worker_id = workerId;
-      task.updated_at = now;
+      memTask.status = "ACCEPTED";
+      memTask.assigned_worker_id = workerId;
+      memTask.updated_at = now;
 
-      memStore.taskOffers.set(`off_${taskId}_${workerId}`, {
-        id: `off_${taskId}_${workerId}`,
-        task_id: taskId,
-        worker_id: workerId,
-        status: "ACCEPTED",
-        offered_at: now,
-        responded_at: now,
-      });
+      const offerKey = `${taskId}_${workerId}`;
+      const offer = memStore.taskOffers.get(offerKey);
+      if (offer) {
+        offer.status = "ACCEPTED";
+        offer.responded_at = now;
+      }
 
-      return { success: true, task: { ...task } };
+      return { success: true, task: { ...memTask } };
     }
   },
 
-  // Start Task (In Progress)
-  async startTask(taskId: string, workerId: string): Promise<{ success: boolean; task?: TaskRow; error?: string; code?: number }> {
+  // Start Task
+  async startTask(
+    taskId: string,
+    workerId: string,
+    workerToken?: string
+  ): Promise<{ success: boolean; task?: TaskRow; error?: string; code?: number }> {
     const pool = getPgPool();
     const now = new Date().toISOString();
+
+    if (workerToken) {
+      const validToken = await this.verifyWorkerToken(taskId, workerId, workerToken);
+      if (!validToken) {
+        return { success: false, error: "Invalid worker token", code: 401 };
+      }
+    }
 
     if (pool) {
       const res = await pool.query(
@@ -480,53 +676,83 @@ export const db = {
     }
   },
 
-  // Submit Result & Complete Task
+  // Submit Result & Complete Task (Atomic Duplicate Prevention)
   async submitTaskResult(params: {
     id: string;
     taskId: string;
     workerId: string;
+    workerToken?: string;
     resultPayload: Record<string, unknown>;
   }): Promise<{ success: boolean; task?: TaskRow; result?: TaskResultRow; error?: string; code?: number }> {
     const pool = getPgPool();
     const now = new Date().toISOString();
 
+    if (params.workerToken) {
+      const validToken = await this.verifyWorkerToken(params.taskId, params.workerId, params.workerToken);
+      if (!validToken) {
+        return { success: false, error: "Invalid worker token", code: 401 };
+      }
+    }
+
     if (pool) {
-      // Check if task exists and worker is assigned
-      const taskRes = await pool.query(`SELECT * FROM tasks WHERE id = $1`, [params.taskId]);
-      if (taskRes.rows.length === 0) return { success: false, error: "Task not found", code: 404 };
-      const task = taskRes.rows[0];
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
 
-      if (task.assigned_worker_id !== params.workerId) {
-        return { success: false, error: "Worker is not assigned to this task", code: 403 };
+        // Atomic check and transition from IN_PROGRESS to COMPLETED
+        const taskUpdateRes = await client.query(
+          `UPDATE tasks
+           SET status = 'COMPLETED', updated_at = $1
+           WHERE id = $2 AND assigned_worker_id = $3 AND status = 'IN_PROGRESS'
+           RETURNING *`,
+          [now, params.taskId, params.workerId]
+        );
+
+        if (taskUpdateRes.rows.length === 0) {
+          await client.query("ROLLBACK");
+          // Check reason for failure
+          const existing = await pool.query(`SELECT * FROM tasks WHERE id = $1`, [params.taskId]);
+          if (existing.rows.length === 0) return { success: false, error: "Task not found", code: 404 };
+          const t = existing.rows[0];
+
+          if (t.assigned_worker_id !== params.workerId) {
+            return { success: false, error: "Worker is not assigned to this task", code: 403 };
+          }
+          if (t.status === "COMPLETED") {
+            return { success: false, error: "Task result already submitted", code: 409 };
+          }
+          return { success: false, error: `Cannot submit result for task in status '${t.status}'`, code: 400 };
+        }
+
+        // Insert result row
+        const resultRes = await client.query(
+          `INSERT INTO task_results (id, task_id, worker_id, result_payload, submitted_at, accepted_at)
+           VALUES ($1, $2, $3, $4, $5, $5)
+           ON CONFLICT (task_id) DO NOTHING
+           RETURNING *`,
+          [params.id, params.taskId, params.workerId, JSON.stringify(params.resultPayload), now]
+        );
+
+        if (resultRes.rows.length === 0) {
+          await client.query("ROLLBACK");
+          return { success: false, error: "Task result already submitted", code: 409 };
+        }
+
+        await client.query("COMMIT");
+        return {
+          success: true,
+          task: taskUpdateRes.rows[0],
+          result: resultRes.rows[0],
+        };
+      } catch (err: any) {
+        await client.query("ROLLBACK");
+        if (err.code === "23505") { // unique constraint violation
+          return { success: false, error: "Task result already submitted", code: 409 };
+        }
+        throw err;
+      } finally {
+        client.release();
       }
-
-      if (task.status === "COMPLETED" || task.status === "SUBMITTED") {
-        return { success: false, error: "Task result already submitted", code: 409 };
-      }
-
-      if (task.status !== "IN_PROGRESS" && task.status !== "ACCEPTED") {
-        return { success: false, error: `Cannot submit result for task in status '${task.status}'`, code: 400 };
-      }
-
-      // Insert result
-      const resultRes = await pool.query(
-        `INSERT INTO task_results (id, task_id, worker_id, result_payload, submitted_at, accepted_at)
-         VALUES ($1, $2, $3, $4, $5, $5)
-         RETURNING *`,
-        [params.id, params.taskId, params.workerId, JSON.stringify(params.resultPayload), now]
-      );
-
-      // Update task to COMPLETED
-      const updatedTaskRes = await pool.query(
-        `UPDATE tasks SET status = 'COMPLETED', updated_at = $1 WHERE id = $2 RETURNING *`,
-        [now, params.taskId]
-      );
-
-      return {
-        success: true,
-        task: updatedTaskRes.rows[0],
-        result: resultRes.rows[0],
-      };
     } else {
       const task = memStore.tasks.get(params.taskId);
       if (!task) return { success: false, error: "Task not found", code: 404 };
@@ -535,13 +761,15 @@ export const db = {
         return { success: false, error: "Worker is not assigned to this task", code: 403 };
       }
 
-      if (task.status === "COMPLETED" || task.status === "SUBMITTED" || memStore.taskResults.has(params.taskId)) {
+      if (task.status === "COMPLETED" || memStore.taskResults.has(params.taskId)) {
         return { success: false, error: "Task result already submitted", code: 409 };
       }
 
-      if (task.status !== "IN_PROGRESS" && task.status !== "ACCEPTED") {
+      if (task.status !== "IN_PROGRESS") {
         return { success: false, error: `Cannot submit result for task in status '${task.status}'`, code: 400 };
       }
+
+      validateTransition(task.status, "COMPLETED");
 
       const resultRow: TaskResultRow = {
         id: params.id,

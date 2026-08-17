@@ -11,7 +11,7 @@ export async function POST(
     const resolvedParams = await params;
     const taskId = resolvedParams.id;
 
-    const body = await request.json();
+    const body = await request.json().catch(() => ({}));
     const parseResult = StartTaskRequestSchema.safeParse(body);
     if (!parseResult.success) {
       return NextResponse.json(
@@ -22,7 +22,11 @@ export async function POST(
 
     const { worker_id } = parseResult.data;
 
-    const startRes = await db.startTask(taskId, worker_id);
+    const headerToken = request.headers.get("x-worker-token") ||
+      request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+    const workerToken = (body as any).token || (body as any).worker_token || headerToken || undefined;
+
+    const startRes = await db.startTask(taskId, worker_id, workerToken);
     if (!startRes.success || !startRes.task) {
       return NextResponse.json(
         { error: startRes.error || "Failed to start task" },

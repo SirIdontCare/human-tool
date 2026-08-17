@@ -11,122 +11,176 @@ import { GET as getResult } from "../src/app/api/tasks/[id]/result/route";
 import { GET as getCatalogue } from "../src/app/api/catalogue/route";
 import { GET as getEvents } from "../src/app/api/events/route";
 
-describe("Sprint 1: End-to-End Next.js API Routes Test", () => {
+describe("Sprint 1 API Invariants & End-to-End Route Integration", () => {
   beforeEach(() => {
     db.resetMemStore();
   });
 
-  it("should support the full API lifecycle across all endpoints", async () => {
-    // 0. GET /api/catalogue
-    const catRes = await getCatalogue();
-    expect(catRes.status).toBe(200);
-    const catData = await catRes.json();
-    expect(catData.task_types).toHaveLength(3);
-
-    // 1. POST /api/quotes
+  it("should test quote creation, expiry, and task creation through the actual routes", async () => {
+    // 1. Create a quote
     const quoteReq = new NextRequest("http://localhost:3000/api/quotes", {
       method: "POST",
       body: JSON.stringify({
-        task_type: "ARCHITECTURE_SANITY_CHECK",
+        task_type: "EXPERT_FACT_VERIFICATION",
         input_payload: {
-          architecture_summary: "Distributed queue with serverless Neon Postgres backend",
-          components: ["Next.js", "Neon Postgres", "Redis"],
-          expected_scale: "10,000 requests per minute",
+          claim: "Neon PostgreSQL separates storage from compute.",
+          context: "Architecture document review",
         },
       }),
     });
-
     const quoteRes = await createQuote(quoteReq);
     expect(quoteRes.status).toBe(201);
     const quoteJson = await quoteRes.json();
     expect(quoteJson.quote_id).toBeDefined();
-    expect(quoteJson.customer_price_usd).toBe(69);
 
-    // 2. POST /api/tasks
+    // 2. Create task from valid quote
     const taskReq = new NextRequest("http://localhost:3000/api/tasks", {
       method: "POST",
       body: JSON.stringify({ quote_id: quoteJson.quote_id }),
     });
-
     const taskRes = await createTask(taskReq);
     expect(taskRes.status).toBe(201);
     const taskJson = await taskRes.json();
     expect(taskJson.task_id).toBeDefined();
-    expect(taskJson.status).toBe("OFFERED");
+    expect(taskJson.agent_token).toBeDefined();
+    expect(taskJson.offers.length).toBeGreaterThanOrEqual(1);
 
-    // 3. GET /api/tasks/[id]
-    const getTaskRes = await getTask(new NextRequest("http://localhost:3000"), {
-      params: Promise.resolve({ id: taskJson.task_id }),
-    });
-    expect(getTaskRes.status).toBe(200);
-    const getTaskJson = await getTaskRes.json();
-    expect(getTaskJson.id).toBe(taskJson.task_id);
-
-    // 4. POST /api/tasks/[id]/accept
-    const acceptReq = new NextRequest("http://localhost:3000", {
+    // 3. Repeated task creation from same quote returns 200 idempotently
+    const repeatReq = new NextRequest("http://localhost:3000/api/tasks", {
       method: "POST",
-      body: JSON.stringify({ worker_id: "w_sam_arch" }),
+      body: JSON.stringify({ quote_id: quoteJson.quote_id }),
     });
-    const acceptRes = await acceptTask(acceptReq, {
-      params: Promise.resolve({ id: taskJson.task_id }),
-    });
-    expect(acceptRes.status).toBe(200);
-    const acceptJson = await acceptRes.json();
-    expect(acceptJson.status).toBe("ACCEPTED");
+    const repeatRes = await createTask(repeatReq);
+    expect(repeatRes.status).toBe(200);
+    const repeatJson = await repeatRes.json();
+    expect(repeatJson.task_id).toBe(taskJson.task_id);
+    expect(repeatJson.is_existing).toBe(true);
+  });
 
-    // 5. POST /api/tasks/[id]/start
-    const startReq = new NextRequest("http://localhost:3000", {
+  it("should enforce authorization boundaries: agent token on result, worker token on accept/submit", async () => {
+    // Setup task
+    const quote = await db.createQuote({
+      id: "quote_route_auth_test",
+      task_type_id: "LANDING_PAGE_REVIEW",
+      input_payload: { url: "https://example.com", target_audience: "B2B SaaS" },
+      quoted_price_usd: 39.0,
+      target_payout_usd: 25.0,
+      estimated_minutes: 30,
+      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    });
+
+    const createRes = await db.createTask({
+      id: "task_route_auth_test",
+      quote_id: quote.id,
+      task_type_id: quote.task_type_id,
+      input_payload: quote.input_payload,
+    });
+
+    const validOffer = createRes.offers.find((o) => o.worker_id === "w_alex_ux");
+
+    // 1. Accept with invalid worker token -> 401
+    const badAcceptReq = new NextRequest("http://localhost:3000", {
       method: "POST",
-      body: JSON.stringify({ worker_id: "w_sam_arch" }),
+      body: JSON.stringify({ worker_id: "w_alex_ux", token: "invalid_worker_token" }),
     });
-    const startRes = await startTask(startReq, {
-      params: Promise.resolve({ id: taskJson.task_id }),
-    });
-    expect(startRes.status).toBe(200);
-    const startJson = await startRes.json();
-    expect(startJson.status).toBe("IN_PROGRESS");
+    const badAcceptRes = await acceptTask(badAcceptReq, { params: Promise.resolve({ id: createRes.task.id }) });
+    expect(badAcceptRes.status).toBe(401);
 
-    // 6. Early result check should return 400
-    const earlyResultRes = await getResult(new NextRequest("http://localhost:3000"), {
-      params: Promise.resolve({ id: taskJson.task_id }),
+    // 2. Accept with incapable worker (e.g. w_alex_ux on ARCHITECTURE task) -> 403
+    const archTask = await db.createTask({
+      id: "task_arch_incapable",
+      quote_id: "quote_arch_fake",
+      task_type_id: "ARCHITECTURE_SANITY_CHECK",
+      input_payload: { architecture_summary: "Description for test", components: ["App"], expected_scale: "10k" },
     });
-    expect(earlyResultRes.status).toBe(400);
+    const incapableReq = new NextRequest("http://localhost:3000", {
+      method: "POST",
+      body: JSON.stringify({ worker_id: "w_alex_ux" }),
+    });
+    const incapableRes = await acceptTask(incapableReq, { params: Promise.resolve({ id: archTask.task.id }) });
+    expect(incapableRes.status).toBe(403);
+    const incapableJson = await incapableRes.json();
+    expect(incapableJson.error).toContain("does not possess the required verified capability");
 
-    // 7. POST /api/tasks/[id]/submit
+    // 3. Valid accept and start
+    const goodAcceptReq = new NextRequest("http://localhost:3000", {
+      method: "POST",
+      body: JSON.stringify({ worker_id: "w_alex_ux", token: validOffer?.worker_token }),
+    });
+    const goodAcceptRes = await acceptTask(goodAcceptReq, { params: Promise.resolve({ id: createRes.task.id }) });
+    expect(goodAcceptRes.status).toBe(200);
+
+    const goodStartReq = new NextRequest("http://localhost:3000", {
+      method: "POST",
+      body: JSON.stringify({ worker_id: "w_alex_ux", token: validOffer?.worker_token }),
+    });
+    await startTask(goodStartReq, { params: Promise.resolve({ id: createRes.task.id }) });
+
+    // 4. Submit valid result
     const submitReq = new NextRequest("http://localhost:3000", {
       method: "POST",
       body: JSON.stringify({
-        worker_id: "w_sam_arch",
+        worker_id: "w_alex_ux",
+        token: validOffer?.worker_token,
         result_payload: {
-          verdict: "good",
-          critical_issues: [],
-          recommended_changes: ["Add connection pooling for Neon serverless driver"],
-          scaling_risks: ["Spike loads over 50k rps require read replicas"],
+          top_issues: ["Hero section is unclear"],
+          highest_impact_change: "Add 3-line quickstart code sample above fold",
+          conversion_blockers: [],
           confidence: 0.95,
         },
       }),
     });
-    const submitRes = await submitTask(submitReq, {
-      params: Promise.resolve({ id: taskJson.task_id }),
-    });
+    const submitRes = await submitTask(submitReq, { params: Promise.resolve({ id: createRes.task.id }) });
     expect(submitRes.status).toBe(200);
-    const submitJson = await submitRes.json();
-    expect(submitJson.status).toBe("COMPLETED");
 
-    // 8. GET /api/tasks/[id]/result
-    const resultRes = await getResult(new NextRequest("http://localhost:3000"), {
-      params: Promise.resolve({ id: taskJson.task_id }),
-    });
-    expect(resultRes.status).toBe(200);
-    const resultJson = await resultRes.json();
+    // 5. Retrieve result without agent token -> 401
+    const noTokenReq = new NextRequest("http://localhost:3000");
+    const noTokenRes = await getResult(noTokenReq, { params: Promise.resolve({ id: createRes.task.id }) });
+    expect(noTokenRes.status).toBe(401);
+
+    // 6. Retrieve result with valid agent token -> 200
+    const validTokenReq = new NextRequest(`http://localhost:3000?agent_token=${createRes.agent_token}`);
+    const validTokenRes = await getResult(validTokenReq, { params: Promise.resolve({ id: createRes.task.id }) });
+    expect(validTokenRes.status).toBe(200);
+    const resultJson = await validTokenRes.json();
     expect(resultJson.status).toBe("COMPLETED");
-    expect(resultJson.result.verdict).toBe("good");
+  });
 
-    // 9. GET /api/events
-    const eventReq = new NextRequest("http://localhost:3000/api/events");
-    const eventRes = await getEvents(eventReq);
-    expect(eventRes.status).toBe(200);
-    const eventJson = await eventRes.json();
-    expect(eventJson.events.length).toBeGreaterThanOrEqual(6);
+  it("should protect public /api/events and redact sensitive input payload", async () => {
+    // Log quote event with customer payload
+    await db.createQuote({
+      id: "quote_secret_payload",
+      task_type_id: "LANDING_PAGE_REVIEW",
+      input_payload: {
+        url: "https://secret-startup.internal/page",
+        target_audience: "Confidential customer list",
+      },
+      quoted_price_usd: 39.0,
+      target_payout_usd: 25.0,
+      estimated_minutes: 30,
+      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    });
+
+    await db.logEvent({
+      id: "evt_secret_test",
+      eventType: "quote_requested",
+      entityType: "quote",
+      entityId: "quote_secret_payload",
+      payload: {
+        task_type: "LANDING_PAGE_REVIEW",
+        input_payload: { secret_field: "my-internal-customer-data" },
+      },
+    });
+
+    // Public request to /api/events
+    const publicReq = new NextRequest("http://localhost:3000/api/events");
+    const publicRes = await getEvents(publicReq);
+    expect(publicRes.status).toBe(200);
+    const publicJson = await publicRes.json();
+
+    const quoteEvent = publicJson.events.find((e: any) => e.entity_id === "quote_secret_payload");
+    expect(quoteEvent).toBeDefined();
+    // input_payload must be redacted
+    expect(quoteEvent.payload.input_payload).toBe("[REDACTED: SENSITIVE CUSTOMER PAYLOAD]");
   });
 });

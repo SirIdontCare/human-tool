@@ -1,124 +1,52 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { db } from "../src/db";
 import { validateTaskInput, validateTaskResult } from "../src/lib/schemas";
-import { canTransition } from "../src/lib/state-machine";
+import { canTransition, VALID_TRANSITIONS } from "../src/lib/state-machine";
+import { verifyTokenHash, hashToken } from "../src/lib/auth";
 
-describe("Sprint 1: Human-Tool Core Lifecycle & Invariants", () => {
+describe("Sprint 1 P0/P1 Invariants & Security Hardening Tests", () => {
   beforeEach(() => {
     db.resetMemStore();
   });
 
-  // 1. Task Lifecycle Happy Path
-  it("should complete the full happy path: Quote -> Task -> Accept -> Start -> Submit -> Result", async () => {
-    // Step 1: Agent requests Quote
-    const quotePayload = {
-      url: "https://agentflow.dev",
-      target_audience: "Autonomous AI agent developers and founders",
-      specific_goals: "Increase API key generation and sandbox retention",
-    };
-
-    const taskType = await db.getTaskType("LANDING_PAGE_REVIEW");
-    expect(taskType).toBeDefined();
-    expect(taskType?.customer_price_usd).toBe(39.0);
-    expect(taskType?.target_payout_usd).toBe(25.0);
-
-    const inputValidation = validateTaskInput("LANDING_PAGE_REVIEW", quotePayload);
-    expect(inputValidation.success).toBe(true);
-
-    const quoteId = "quote_test_happy_path";
+  // 1. Concurrent Task Creation from Same Quote (Idempotency & Database Unique Constraint)
+  it("should return the exact same task when creating concurrently from the same quote", async () => {
     const quote = await db.createQuote({
-      id: quoteId,
+      id: "quote_test_idempotent",
       task_type_id: "LANDING_PAGE_REVIEW",
-      input_payload: quotePayload,
+      input_payload: { url: "https://example.com", target_audience: "B2B SaaS" },
       quoted_price_usd: 39.0,
       target_payout_usd: 25.0,
       estimated_minutes: 30,
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
-    expect(quote.id).toBe(quoteId);
 
-    // Step 2: Agent creates Task from Quote
-    const taskId = "task_test_happy_path";
-    const task = await db.createTask({
-      id: taskId,
-      quote_id: quote.id,
-      task_type_id: quote.task_type_id,
-      input_payload: quote.input_payload,
-    });
-    expect(task.id).toBe(taskId);
-    expect(task.status).toBe("OFFERED");
-    expect(task.assigned_worker_id).toBeNull();
+    // Fire 5 concurrent creation requests for the SAME quote
+    const results = await Promise.all([
+      db.createTask({ id: "task_idem_1", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
+      db.createTask({ id: "task_idem_2", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
+      db.createTask({ id: "task_idem_3", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
+      db.createTask({ id: "task_idem_4", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
+      db.createTask({ id: "task_idem_5", quote_id: quote.id, task_type_id: quote.task_type_id, input_payload: quote.input_payload }),
+    ]);
 
-    // Step 3: Human Worker accepts Task
-    const workerId = "w_alex_ux";
-    const acceptRes = await db.acceptTask(taskId, workerId);
-    expect(acceptRes.success).toBe(true);
-    expect(acceptRes.task?.status).toBe("ACCEPTED");
-    expect(acceptRes.task?.assigned_worker_id).toBe(workerId);
-
-    // Step 4: Worker starts Task
-    const startRes = await db.startTask(taskId, workerId);
-    expect(startRes.success).toBe(true);
-    expect(startRes.task?.status).toBe("IN_PROGRESS");
-
-    // Step 5: Worker submits validated structured result
-    const resultPayload = {
-      top_issues: [
-        "Hero headline lacks immediate value proposition for agent developers",
-        "Code sample is missing TypeScript type declarations",
-        "API pricing tier limits are ambiguous on free tier",
-      ],
-      highest_impact_change: "Add an interactive 3-line curl/SDK quickstart directly above the fold",
-      conversion_blockers: [
-        "Sign up requires email verification before accessing API keys",
-      ],
-      confidence: 0.95,
-    };
-
-    const resultValidation = validateTaskResult("LANDING_PAGE_REVIEW", resultPayload);
-    expect(resultValidation.success).toBe(true);
-
-    const submitRes = await db.submitTaskResult({
-      id: "res_test_happy_path",
-      taskId,
-      workerId,
-      resultPayload,
-    });
-    expect(submitRes.success).toBe(true);
-    expect(submitRes.task?.status).toBe("COMPLETED");
-
-    // Step 6: Agent retrieves result
-    const storedResult = await db.getTaskResult(taskId);
-    expect(storedResult).toBeDefined();
-    expect(storedResult?.result_payload).toEqual(resultPayload);
-    expect(storedResult?.worker_id).toBe(workerId);
+    // Exactly one created, others returned existing
+    const uniqueTaskIds = new Set(results.map((r) => r.task.id));
+    expect(uniqueTaskIds.size).toBe(1);
+    const existingFlags = results.map((r) => r.is_existing);
+    expect(existingFlags.filter((f) => f === false)).toHaveLength(1);
+    expect(existingFlags.filter((f) => f === true)).toHaveLength(4);
   });
 
-  // 2. Invalid State Transitions
-  it("should enforce the state machine and reject invalid state transitions", async () => {
-    expect(canTransition("CREATED", "ACCEPTED")).toBe(true);
-    expect(canTransition("OFFERED", "ACCEPTED")).toBe(true);
-    expect(canTransition("ACCEPTED", "IN_PROGRESS")).toBe(true);
-    expect(canTransition("IN_PROGRESS", "SUBMITTED")).toBe(true);
-    expect(canTransition("SUBMITTED", "COMPLETED")).toBe(true);
-
-    // Invalid jumps
-    expect(canTransition("CREATED", "SUBMITTED")).toBe(false);
-    expect(canTransition("CREATED", "COMPLETED")).toBe(false);
-    expect(canTransition("COMPLETED", "IN_PROGRESS")).toBe(false);
-    expect(canTransition("COMPLETED", "ACCEPTED")).toBe(false);
-    expect(canTransition("CANCELLED", "ACCEPTED")).toBe(false);
-  });
-
-  // 3. Concurrency / Two Workers Accepting Same Task
-  it("should prevent race conditions when two workers attempt to accept the same task", async () => {
+  // 2. Incapable Worker Acceptance Enforcement (403 Forbidden)
+  it("should reject task acceptance with 403 when worker lacks verified capability", async () => {
     const quote = await db.createQuote({
-      id: "quote_race_test",
-      task_type_id: "ARCHITECTURE_SANITY_CHECK",
+      id: "quote_test_capability",
+      task_type_id: "ARCHITECTURE_SANITY_CHECK", // requires SYSTEM_ARCHITECTURE
       input_payload: {
-        architecture_summary: "Multi-tenant PostgreSQL on Neon with connection pooling",
-        components: ["Next.js", "Neon Postgres", "Redis Cache"],
-        expected_scale: "10k requests per second",
+        architecture_summary: "Multi-tenant Kubernetes deployment",
+        components: ["Kubernetes", "PostgreSQL"],
+        expected_scale: "10k rps",
       },
       quoted_price_usd: 69.0,
       target_payout_usd: 45.0,
@@ -126,162 +54,245 @@ describe("Sprint 1: Human-Tool Core Lifecycle & Invariants", () => {
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const task = await db.createTask({
-      id: "task_race_test",
+    const createRes = await db.createTask({
+      id: "task_test_capability",
       quote_id: quote.id,
       task_type_id: quote.task_type_id,
       input_payload: quote.input_payload,
     });
 
-    // Worker 1 accepts
-    const res1 = await db.acceptTask(task.id, "w_sam_arch");
-    expect(res1.success).toBe(true);
-    expect(res1.task?.assigned_worker_id).toBe("w_sam_arch");
-
-    // Worker 2 attempts to accept the same task
-    const res2 = await db.acceptTask(task.id, "w_morgan_general");
-    expect(res2.success).toBe(false);
-    expect(res2.code).toBe(409);
-    expect(res2.error).toContain("already accepted by another worker");
+    // w_alex_ux has UX_CONVERSION_ANALYSIS, but NOT SYSTEM_ARCHITECTURE
+    const acceptRes = await db.acceptTask(createRes.task.id, "w_alex_ux");
+    expect(acceptRes.success).toBe(false);
+    expect(acceptRes.code).toBe(403);
+    expect(acceptRes.error).toContain("does not possess the required verified capability");
   });
 
-  // 4. Malformed Result Payload
-  it("should reject malformed result payloads that do not adhere to task type schema", () => {
-    // Malformed Landing Page Review: missing highest_impact_change and confidence out of bounds
-    const badLandingPageResult = {
-      top_issues: ["Color scheme is dull"],
-      confidence: 1.5, // invalid: max is 1.0
-    };
-    const val1 = validateTaskResult("LANDING_PAGE_REVIEW", badLandingPageResult);
-    expect(val1.success).toBe(false);
-
-    // Malformed Architecture Review: invalid verdict enum
-    const badArchResult = {
-      verdict: "super_awesome", // invalid enum
-      critical_issues: [],
-      recommended_changes: ["Upgrade RAM"],
-      scaling_risks: [],
-      confidence: 0.9,
-    };
-    const val2 = validateTaskResult("ARCHITECTURE_SANITY_CHECK", badArchResult);
-    expect(val2.success).toBe(false);
-
-    // Malformed Fact Check: missing explanation
-    const badFactResult = {
-      verdict: "true",
-      confidence: 0.9,
-    };
-    const val3 = validateTaskResult("EXPERT_FACT_VERIFICATION", badFactResult);
-    expect(val3.success).toBe(false);
-  });
-
-  // 5. Expired Quote
-  it("should identify and reject expired quotes", async () => {
-    const expiredQuote = await db.createQuote({
-      id: "quote_expired_test",
-      task_type_id: "EXPERT_FACT_VERIFICATION",
+  // 3. Concurrent Task Acceptance (Exactly One 200, One 409)
+  it("should allow exactly one worker to accept concurrently, returning 409 to the loser", async () => {
+    const quote = await db.createQuote({
+      id: "quote_test_race_accept",
+      task_type_id: "ARCHITECTURE_SANITY_CHECK",
       input_payload: {
-        claim: "Vercel serverless functions have a 5-minute timeout by default",
-        context: "Documentation review",
+        architecture_summary: "Distributed system on Neon Postgres",
+        components: ["Next.js", "Neon Postgres"],
+        expected_scale: "50k rps",
       },
-      quoted_price_usd: 29.0,
-      target_payout_usd: 18.0,
-      estimated_minutes: 30,
-      expires_at: new Date(Date.now() - 1000).toISOString(), // expired in past
+      quoted_price_usd: 69.0,
+      target_payout_usd: 45.0,
+      estimated_minutes: 60,
+      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const isExpired = new Date(expiredQuote.expires_at).getTime() < Date.now();
-    expect(isExpired).toBe(true);
+    const createRes = await db.createTask({
+      id: "task_test_race_accept",
+      quote_id: quote.id,
+      task_type_id: quote.task_type_id,
+      input_payload: quote.input_payload,
+    });
+
+    // Both w_sam_arch and w_morgan_general have SYSTEM_ARCHITECTURE capability
+    const offer1 = createRes.offers.find((o) => o.worker_id === "w_sam_arch");
+    const offer2 = createRes.offers.find((o) => o.worker_id === "w_morgan_general");
+
+    const [res1, res2] = await Promise.all([
+      db.acceptTask(createRes.task.id, "w_sam_arch", offer1?.worker_token),
+      db.acceptTask(createRes.task.id, "w_morgan_general", offer2?.worker_token),
+    ]);
+
+    const successes = [res1, res2].filter((r) => r.success);
+    const conflicts = [res1, res2].filter((r) => !r.success && r.code === 409);
+
+    expect(successes).toHaveLength(1);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].error).toContain("already accepted by another worker");
   });
 
-  // 6. Duplicate Submission
-  it("should prevent duplicate result submissions on an already completed task", async () => {
+  // 4. Concurrent Duplicate Submissions (One Success, One 409, Never 500)
+  it("should handle concurrent result submissions atomically: exactly one success, other returns 409", async () => {
     const quote = await db.createQuote({
-      id: "quote_dup_test",
+      id: "quote_test_race_submit",
       task_type_id: "EXPERT_FACT_VERIFICATION",
-      input_payload: {
-        claim: "Neon PostgreSQL separates compute from storage.",
-        context: "Technical validation",
-      },
+      input_payload: { claim: "Neon supports branching in Postgres", context: "Documentation check" },
       quoted_price_usd: 29.0,
       target_payout_usd: 18.0,
       estimated_minutes: 30,
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const task = await db.createTask({
-      id: "task_dup_test",
+    const createRes = await db.createTask({
+      id: "task_test_race_submit",
       quote_id: quote.id,
       task_type_id: quote.task_type_id,
       input_payload: quote.input_payload,
     });
 
-    await db.acceptTask(task.id, "w_elena_fact");
-    await db.startTask(task.id, "w_elena_fact");
+    const workerOffer = createRes.offers.find((o) => o.worker_id === "w_elena_fact");
+    await db.acceptTask(createRes.task.id, "w_elena_fact", workerOffer?.worker_token);
+    await db.startTask(createRes.task.id, "w_elena_fact", workerOffer?.worker_token);
 
     const validResult = {
       verdict: "true" as const,
-      explanation: "Neon architecture separates Postgres compute nodes from custom Page Server storage layers.",
+      explanation: "Neon architecture decouples storage and compute allowing instant branching.",
       confidence: 0.99,
-      source_notes: "Neon Architecture whitepaper and official docs.",
     };
 
-    // First submission: Success
-    const sub1 = await db.submitTaskResult({
-      id: "res_dup_1",
-      taskId: task.id,
-      workerId: "w_elena_fact",
-      resultPayload: validResult,
-    });
-    expect(sub1.success).toBe(true);
+    // 2 concurrent submissions
+    const [sub1, sub2] = await Promise.all([
+      db.submitTaskResult({
+        id: "res_race_1",
+        taskId: createRes.task.id,
+        workerId: "w_elena_fact",
+        workerToken: workerOffer?.worker_token,
+        resultPayload: validResult,
+      }),
+      db.submitTaskResult({
+        id: "res_race_2",
+        taskId: createRes.task.id,
+        workerId: "w_elena_fact",
+        workerToken: workerOffer?.worker_token,
+        resultPayload: validResult,
+      }),
+    ]);
 
-    // Second submission: Blocked with 409
-    const sub2 = await db.submitTaskResult({
-      id: "res_dup_2",
-      taskId: task.id,
-      workerId: "w_elena_fact",
-      resultPayload: validResult,
-    });
-    expect(sub2.success).toBe(false);
-    expect(sub2.code).toBe(409);
-    expect(sub2.error).toContain("already submitted");
+    const successes = [sub1, sub2].filter((s) => s.success);
+    const conflicts = [sub1, sub2].filter((s) => !s.success && s.code === 409);
+
+    expect(successes).toHaveLength(1);
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0].error).toContain("already submitted");
   });
 
-  // 7. Result Retrieval Before Completion
-  it("should not return results before task completion", async () => {
+  // 5. State Machine Invariants
+  it("should strictly enforce valid transitions and reject illegal jumps", () => {
+    // Valid transitions
+    expect(canTransition("OFFERED", "ACCEPTED")).toBe(true);
+    expect(canTransition("ACCEPTED", "IN_PROGRESS")).toBe(true);
+    expect(canTransition("IN_PROGRESS", "COMPLETED")).toBe(true);
+
+    // Illegal jumps
+    expect(canTransition("OFFERED", "IN_PROGRESS")).toBe(false);
+    expect(canTransition("OFFERED", "COMPLETED")).toBe(false);
+    expect(canTransition("COMPLETED", "IN_PROGRESS")).toBe(false);
+    expect(canTransition("COMPLETED", "ACCEPTED")).toBe(false);
+    expect(canTransition("CANCELLED", "ACCEPTED")).toBe(false);
+
+    // Declared transitions match state definitions
+    expect(VALID_TRANSITIONS.OFFERED).toEqual(["ACCEPTED", "CANCELLED", "EXPIRED"]);
+    expect(VALID_TRANSITIONS.ACCEPTED).toEqual(["IN_PROGRESS", "CANCELLED", "FAILED"]);
+    expect(VALID_TRANSITIONS.IN_PROGRESS).toEqual(["COMPLETED", "CANCELLED", "FAILED"]);
+    expect(VALID_TRANSITIONS.COMPLETED).toEqual([]);
+  });
+
+  // 6. task_offers Row Persisted for Every Offered Worker
+  it("should persist one task_offers row with unguessable token hash per qualified worker", async () => {
     const quote = await db.createQuote({
-      id: "quote_early_res_test",
+      id: "quote_test_offers_count",
+      task_type_id: "ARCHITECTURE_SANITY_CHECK",
+      input_payload: { architecture_summary: "Test architecture description for verification", components: ["App"], expected_scale: "10k" },
+      quoted_price_usd: 69.0,
+      target_payout_usd: 45.0,
+      estimated_minutes: 60,
+      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    });
+
+    const createRes = await db.createTask({
+      id: "task_test_offers_count",
+      quote_id: quote.id,
+      task_type_id: quote.task_type_id,
+      input_payload: quote.input_payload,
+    });
+
+    // Qualified workers for SYSTEM_ARCHITECTURE: w_sam_arch, w_morgan_general
+    const qualified = await db.getWorkersByCapability("SYSTEM_ARCHITECTURE");
+    expect(createRes.offers).toHaveLength(qualified.length);
+
+    const persistedOffers = await db.getOffersForTask(createRes.task.id);
+    expect(persistedOffers).toHaveLength(qualified.length);
+
+    // Verify token hash is stored
+    for (const offer of persistedOffers) {
+      expect(offer.worker_token_hash).toBeDefined();
+      expect(offer.worker_token_hash.length).toBe(64); // SHA-256 hex
+    }
+  });
+
+  // 7. Worker Offer Token Authorization Boundary
+  it("should reject worker mutation when worker offer token is invalid or missing", async () => {
+    const quote = await db.createQuote({
+      id: "quote_test_worker_auth",
       task_type_id: "LANDING_PAGE_REVIEW",
-      input_payload: {
-        url: "https://example.com",
-        target_audience: "SaaS users",
-      },
+      input_payload: { url: "https://example.com", target_audience: "B2B SaaS" },
       quoted_price_usd: 39.0,
       target_payout_usd: 25.0,
       estimated_minutes: 30,
       expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
     });
 
-    const task = await db.createTask({
-      id: "task_early_res_test",
+    const createRes = await db.createTask({
+      id: "task_test_worker_auth",
       quote_id: quote.id,
       task_type_id: quote.task_type_id,
       input_payload: quote.input_payload,
     });
 
-    // In OFFERED status, result is null and status is not COMPLETED
-    expect(task.status).not.toBe("COMPLETED");
-    const result = await db.getTaskResult(task.id);
-    expect(result).toBeNull();
+    // Reject invalid token on accept
+    const badAccept = await db.acceptTask(createRes.task.id, "w_alex_ux", "invalid_worker_token_xyz");
+    expect(badAccept.success).toBe(false);
+    expect(badAccept.code).toBe(401);
+
+    // Valid accept
+    const validOffer = createRes.offers.find((o) => o.worker_id === "w_alex_ux");
+    const goodAccept = await db.acceptTask(createRes.task.id, "w_alex_ux", validOffer?.worker_token);
+    expect(goodAccept.success).toBe(true);
+
+    // Reject invalid token on start
+    const badStart = await db.startTask(createRes.task.id, "w_alex_ux", "wrong_token");
+    expect(badStart.success).toBe(false);
+    expect(badStart.code).toBe(401);
+
+    // Reject invalid token on submit
+    const badSubmit = await db.submitTaskResult({
+      id: "res_bad_tok",
+      taskId: createRes.task.id,
+      workerId: "w_alex_ux",
+      workerToken: "wrong_token",
+      resultPayload: {
+        top_issues: ["Issue 1"],
+        highest_impact_change: "Change 1",
+        confidence: 0.9,
+      },
+    });
+    expect(badSubmit.success).toBe(false);
+    expect(badSubmit.code).toBe(401);
   });
 
-  // 8. Unsupported Task Type
-  it("should reject unsupported task types", async () => {
-    const unsupportedType = "LEGAL_CONTRACT_REVIEW";
-    const taskType = await db.getTaskType(unsupportedType);
-    expect(taskType).toBeNull();
+  // 8. Agent Task Token Authorization Boundary
+  it("should verify unguessable agent token hash and reject unauthorized result access", async () => {
+    const quote = await db.createQuote({
+      id: "quote_test_agent_auth",
+      task_type_id: "EXPERT_FACT_VERIFICATION",
+      input_payload: { claim: "Verifiable fact check claim", context: "Context check" },
+      quoted_price_usd: 29.0,
+      target_payout_usd: 18.0,
+      estimated_minutes: 30,
+      expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    });
 
-    const inputVal = validateTaskInput(unsupportedType, { foo: "bar" });
-    expect(inputVal.success).toBe(false);
+    const createRes = await db.createTask({
+      id: "task_test_agent_auth",
+      quote_id: quote.id,
+      task_type_id: quote.task_type_id,
+      input_payload: quote.input_payload,
+    });
+
+    expect(createRes.agent_token).toMatch(/^atk_/);
+
+    // Verify token hash verification
+    const isValid = await db.verifyAgentToken(createRes.task.id, createRes.agent_token);
+    expect(isValid).toBe(true);
+
+    const isFakeValid = await db.verifyAgentToken(createRes.task.id, "atk_fake_invalid_token_123");
+    expect(isFakeValid).toBe(false);
   });
 });

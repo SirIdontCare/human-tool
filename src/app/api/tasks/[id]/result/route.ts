@@ -10,9 +10,26 @@ export async function GET(
     const resolvedParams = await params;
     const taskId = resolvedParams.id;
 
+    // Check agent token authorization
+    const authHeader = request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+    const customHeader = request.headers.get("x-agent-token");
+    const queryToken = request.nextUrl.searchParams.get("agent_token") || request.nextUrl.searchParams.get("token");
+    const agentToken = authHeader || customHeader || queryToken || "";
+
     const task = await db.getTask(taskId);
     if (!task) {
       return NextResponse.json({ error: `Task '${taskId}' not found` }, { status: 404 });
+    }
+
+    // Verify token if agent_token_hash exists on task
+    if (task.agent_token_hash) {
+      const isAuthorized = await db.verifyAgentToken(taskId, agentToken);
+      if (!isAuthorized) {
+        return NextResponse.json(
+          { error: "Unauthorized: Invalid or missing agent task token" },
+          { status: 401 }
+        );
+      }
     }
 
     if (task.status !== "COMPLETED") {

@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS worker_capabilities (
   capability_code VARCHAR(64) NOT NULL,
   score NUMERIC(3, 2) NOT NULL DEFAULT 1.00,
   status VARCHAR(32) NOT NULL DEFAULT 'VERIFIED',
-  verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT uq_worker_capability UNIQUE (worker_id, capability_code)
 );
 
 CREATE TABLE IF NOT EXISTS quotes (
@@ -45,11 +46,12 @@ CREATE TABLE IF NOT EXISTS quotes (
 
 CREATE TABLE IF NOT EXISTS tasks (
   id VARCHAR(64) PRIMARY KEY,
-  quote_id VARCHAR(64) NOT NULL REFERENCES quotes(id),
+  quote_id VARCHAR(64) UNIQUE NOT NULL REFERENCES quotes(id),
   task_type_id VARCHAR(64) NOT NULL REFERENCES task_types(id),
-  status VARCHAR(32) NOT NULL DEFAULT 'CREATED',
+  status VARCHAR(32) NOT NULL DEFAULT 'OFFERED',
   input_payload JSONB NOT NULL,
   assigned_worker_id VARCHAR(64) REFERENCES workers(id),
+  agent_token_hash VARCHAR(64) NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -58,9 +60,11 @@ CREATE TABLE IF NOT EXISTS task_offers (
   id VARCHAR(64) PRIMARY KEY,
   task_id VARCHAR(64) NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   worker_id VARCHAR(64) NOT NULL REFERENCES workers(id),
+  worker_token_hash VARCHAR(64) NOT NULL,
   status VARCHAR(32) NOT NULL DEFAULT 'OFFERED',
   offered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  responded_at TIMESTAMPTZ
+  responded_at TIMESTAMPTZ,
+  CONSTRAINT uq_task_worker_offer UNIQUE (task_id, worker_id)
 );
 
 CREATE TABLE IF NOT EXISTS task_results (
@@ -83,7 +87,9 @@ CREATE TABLE IF NOT EXISTS events (
 
 -- Indexes for performance and lifecycle queries
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_quote_id ON tasks(quote_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned_worker ON tasks(assigned_worker_id);
 CREATE INDEX IF NOT EXISTS idx_events_entity ON events(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_task_offers_worker ON task_offers(worker_id);
+CREATE INDEX IF NOT EXISTS idx_task_offers_task ON task_offers(task_id);

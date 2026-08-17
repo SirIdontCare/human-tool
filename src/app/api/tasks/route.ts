@@ -34,53 +34,97 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const taskType = await db.getTaskType(quote.task_type_id);
+    // Check for existing task (Idempotency)
+    const existingTask = await db.getTaskByQuoteId(quote.id);
+    if (existingTask) {
+      const origin = request.headers.get("origin") || request.nextUrl.origin || "";
+      return NextResponse.json(
+        {
+          task_id: existingTask.id,
+          quote_id: existingTask.quote_id,
+          task_type: existingTask.task_type_id,
+          status: existingTask.status,
+          customer_price_usd: quote.quoted_price_usd,
+          target_payout_usd: quote.target_payout_usd,
+          estimated_minutes: quote.estimated_minutes,
+          worker_task_url: `${origin}/tasks/${existingTask.id}`,
+          created_at: existingTask.created_at,
+          is_existing: true,
+        },
+        { status: 200 }
+      );
+    }
+
     const taskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
 
-    // Create task
-    const task = await db.createTask({
+    // Create task atomically
+    const createRes = await db.createTask({
       id: taskId,
       quote_id: quote.id,
       task_type_id: quote.task_type_id,
       input_payload: quote.input_payload,
     });
 
+    if (createRes.is_existing) {
+      const origin = request.headers.get("origin") || request.nextUrl.origin || "";
+      return NextResponse.json(
+        {
+          task_id: createRes.task.id,
+          quote_id: createRes.task.quote_id,
+          task_type: createRes.task.task_type_id,
+          status: createRes.task.status,
+          customer_price_usd: quote.quoted_price_usd,
+          target_payout_usd: quote.target_payout_usd,
+          estimated_minutes: quote.estimated_minutes,
+          worker_task_url: `${origin}/tasks/${createRes.task.id}`,
+          created_at: createRes.task.created_at,
+          is_existing: true,
+        },
+        { status: 200 }
+      );
+    }
+
     // Log task_created event
-    await logEvent("task_created", "task", taskId, {
+    await logEvent("task_created", "task", createRes.task.id, {
       quote_id: quote.id,
-      task_type: task.task_type_id,
-      status: task.status,
+      task_type: createRes.task.task_type_id,
+      status: createRes.task.status,
       customer_price_usd: quote.quoted_price_usd,
       target_payout_usd: quote.target_payout_usd,
     });
 
-    // Match and offer to qualified workers
-    const capability = taskType?.required_capability || "";
-    const qualifiedWorkers = await db.getWorkersByCapability(capability);
-
-    for (const worker of qualifiedWorkers) {
-      await logEvent("task_offered", "task", taskId, {
-        worker_id: worker.id,
-        worker_name: worker.display_name,
+    // Log offer event for each offered worker
+    for (const offer of createRes.offers) {
+      await logEvent("task_offered", "task", createRes.task.id, {
+        worker_id: offer.worker_id,
         target_payout_usd: quote.target_payout_usd,
         sla_minutes: quote.estimated_minutes,
       });
     }
 
     const origin = request.headers.get("origin") || request.nextUrl.origin || "";
-    const workerTaskUrl = `${origin}/tasks/${task.id}`;
+    const primaryOffer = createRes.offers[0];
+    const workerTaskUrl = primaryOffer
+      ? `${origin}/tasks/${createRes.task.id}?worker_id=${primaryOffer.worker_id}&token=${primaryOffer.worker_token}`
+      : `${origin}/tasks/${createRes.task.id}`;
 
     return NextResponse.json(
       {
-        task_id: task.id,
-        quote_id: task.quote_id,
-        task_type: task.task_type_id,
-        status: task.status,
+        task_id: createRes.task.id,
+        quote_id: createRes.task.quote_id,
+        task_type: createRes.task.task_type_id,
+        status: createRes.task.status,
         customer_price_usd: quote.quoted_price_usd,
         target_payout_usd: quote.target_payout_usd,
         estimated_minutes: quote.estimated_minutes,
+        agent_token: createRes.agent_token,
         worker_task_url: workerTaskUrl,
-        created_at: task.created_at,
+        offers: createRes.offers.map((o) => ({
+          worker_id: o.worker_id,
+          worker_token: o.worker_token,
+          worker_url: `${origin}/tasks/${createRes.task.id}?worker_id=${o.worker_id}&token=${o.worker_token}`,
+        })),
+        created_at: createRes.task.created_at,
       },
       { status: 201 }
     );

@@ -107,6 +107,8 @@ function WorkerTaskContent() {
     }
   }, [taskId]);
 
+  const workerToken = searchParams?.get("token") || searchParams?.get("worker_token") || "";
+
   const handleAccept = async () => {
     setError(null);
     setSubmitting(true);
@@ -114,7 +116,7 @@ function WorkerTaskContent() {
       const res = await fetch(`/api/tasks/${taskId}/accept`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_id: selectedWorkerId }),
+        body: JSON.stringify({ worker_id: selectedWorkerId, token: workerToken || undefined }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to accept task");
@@ -133,7 +135,7 @@ function WorkerTaskContent() {
       const res = await fetch(`/api/tasks/${taskId}/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ worker_id: selectedWorkerId }),
+        body: JSON.stringify({ worker_id: selectedWorkerId, token: workerToken || undefined }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to start task");
@@ -193,6 +195,7 @@ function WorkerTaskContent() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           worker_id: selectedWorkerId,
+          token: workerToken || undefined,
           result_payload: resultPayload,
         }),
       });

@@ -11,7 +11,7 @@ export async function POST(
     const resolvedParams = await params;
     const taskId = resolvedParams.id;
 
-    const body = await request.json();
+    const body = await request.json().catch(() => ({}));
     const parseResult = SubmitTaskResultRequestSchema.safeParse(body);
     if (!parseResult.success) {
       return NextResponse.json(
@@ -21,6 +21,10 @@ export async function POST(
     }
 
     const { worker_id, result_payload } = parseResult.data;
+
+    const headerToken = request.headers.get("x-worker-token") ||
+      request.headers.get("authorization")?.replace(/^Bearer\s+/i, "");
+    const workerToken = (body as any).token || (body as any).worker_token || headerToken || undefined;
 
     // Fetch task
     const task = await db.getTask(taskId);
@@ -46,6 +50,7 @@ export async function POST(
       id: resultId,
       taskId,
       workerId: worker_id,
+      workerToken,
       resultPayload: resultValidation.data as Record<string, unknown>,
     });
 
